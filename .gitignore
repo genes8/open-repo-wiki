@@ -8,4 +8,7 @@ wiki-pdf/
 # test artifacts
 test/fixture-repo/
 
+# editor / tooling output
+.qoder/
+
 .DS_Store

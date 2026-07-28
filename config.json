@@ -2,6 +2,7 @@
   "default": "ollama-qwen",
   "language": "en",
   "maxPages": 20,
+  "template": "standard",
   "models": {
     "ollama-qwen": {
       "provider": "ollama",

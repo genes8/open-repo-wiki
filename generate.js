@@ -19,7 +19,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { scanRepo } = require('./lib/scan');
 const { chat, resolveApiKey } = require('./lib/providers');
-const { planMessages, pageMessages, extractJson } = require('./lib/prompts');
+const { planMessages, pageMessages, knowledgeMessages, KNOWLEDGE_CARDS, extractJson } = require('./lib/prompts');
+const { moduleMap, titleCase } = require('./lib/modules');
 
 const HELP = `Local Repo Wiki generator
 
@@ -32,6 +33,13 @@ Options:
                         then <appDir>/config.json)
       --pages <substr>  only (re)generate pages whose path contains substring
       --concurrency <n> pages generated in parallel (default: profile/config, else 1)
+      --template <name> page template: "standard" (citations + TOC) or "minimal"
+      --knowledge       also generate the structured knowledge-card layer.
+                        Written to <root>/knowledge/<lang> (a sibling of the
+                        content-language dir, mirroring Qoder's repowiki layout);
+                        assumes the default <root>/<lang>/content output tree. With
+                        a custom flat --out the tree is placed two levels up from
+                        --out and may fall outside it.
       --force           regenerate everything, ignore the incremental cache
       --dry-run         print the wiki plan and exit without writing pages
       --list-models     list configured model profiles and exit
@@ -51,6 +59,8 @@ function parseArgs(argv) {
     else if (a === '--config' || a === '-c') args.config = argv[++i];
     else if (a === '--pages') args.pages = argv[++i];
     else if (a === '--concurrency') args.concurrency = argv[++i];
+    else if (a === '--template') args.template = argv[++i];
+    else if (a === '--knowledge') args.knowledge = true;
     else if (a === '--force') args.force = true;
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--list-models') args.listModels = true;
@@ -158,6 +168,14 @@ function buildFilesBlock(repoDir, page, scan, budget) {
   const maxPages = config.maxPages || 20;
   const language = config.language || 'en';
   const contextChars = profile.contextChars || 24000;
+  const template = args.template || config.template || 'standard';
+  // Sibling output trees derived from the content dir: <content>/../meta and
+  // <root>/knowledge/<lang> (mirrors Qoder's repowiki layout). metaDir is kept as
+  // the direct sibling of the content dir so export.js (which resolves the catalog
+  // at <SRC>/../meta) finds it for ANY --out location, not just the default tree.
+  const localWikiRoot = path.resolve(outDir, '..', '..');
+  const metaDir = path.join(outDir, '..', 'meta');
+  const knowledgeBase = path.join(localWikiRoot, 'knowledge', language);
 
   console.log(`Repo:   ${repoDir}`);
   console.log(`Model:  ${modelName} (${profile.provider}: ${profile.model || profile.modelPath})`);
@@ -220,12 +238,42 @@ function buildFilesBlock(repoDir, page, scan, budget) {
   let ok = 0, skipped = 0, failed = 0;
   const currentPaths = new Set(pages.map(p => p.path));
 
+  // Landing pages (a "dir/dir.md" or "dir/index.md" heading a multi-page
+  // subdirectory) are generated AFTER their children so the summary can link
+  // the real child pages. Enrich their focus with the concrete child list first.
+  const dirOf = (p) => { const i = p.lastIndexOf('/'); return i === -1 ? '' : p.slice(0, i); };
+  const baseNoExt = (p) => p.slice(p.lastIndexOf('/') + 1).replace(/\.md$/, '');
+  const pagesByDir = new Map();
+  for (const p of pages) {
+    const d = dirOf(p.path);
+    if (!pagesByDir.has(d)) pagesByDir.set(d, []);
+    pagesByDir.get(d).push(p);
+  }
+  for (const p of pages) {
+    const d = dirOf(p.path);
+    if (!d) continue;
+    const dirLast = d.slice(d.lastIndexOf('/') + 1);
+    const bn = baseNoExt(p.path);
+    if (bn !== dirLast && bn !== 'index') continue;
+    const children = (pagesByDir.get(d) || []).filter(s => s.path !== p.path);
+    if (children.length === 0) continue;
+    p._landing = true;
+    p._children = children;
+    p._desc0 = p.description;
+    const links = children
+      .map(c => `- [${c.title}](${c.path.slice(c.path.lastIndexOf('/') + 1)})`)
+      .join('\n');
+    p.description = `${p.description || p.title}\n\nThis is the landing page for the "${d}" section. Introduce the section briefly, then link to each child page:\n${links}`;
+  }
+  const mainPages = pages.filter(p => !p._landing);
+  const landingPages = pages.filter(p => p._landing);
+
   const processPage = async (page) => {
     if (args.pages && !page.path.includes(args.pages)) { skipped++; return; }
     const outFile = path.join(outDir, page.path);
     const { block, attached } = buildFilesBlock(repoDir, page, scan, contextChars);
     const hash = sha1([
-      modelName, language, page.title, page.description || '',
+      modelName, language, template, page.title, page.description || '',
       ...attached.map(rel => { try { return sha1(fs.readFileSync(path.join(repoDir, rel))); } catch { return rel; } }),
     ].join('|'));
 
@@ -236,7 +284,7 @@ function buildFilesBlock(repoDir, page, scan, budget) {
     }
     try {
       console.log(`  GEN   ${page.path} ...`);
-      const raw = await chat(profile, pageMessages(scan, page, block, { language }), { maxTokens: profile.maxTokens });
+      const raw = await chat(profile, pageMessages(scan, page, block, { language, attached, template }), { maxTokens: profile.maxTokens });
       const md = unwrapMarkdown(raw);
       if (md.length < 50) throw new Error('suspiciously short page output');
       fs.mkdirSync(path.dirname(outFile), { recursive: true });
@@ -251,10 +299,14 @@ function buildFilesBlock(repoDir, page, scan, budget) {
     }
   };
 
-  let nextIdx = 0;
-  await Promise.all(Array.from({ length: Math.min(concurrency, pages.length) }, async () => {
-    while (nextIdx < pages.length) await processPage(pages[nextIdx++]);
-  }));
+  const runPool = async (list) => {
+    let idx = 0;
+    await Promise.all(Array.from({ length: Math.min(concurrency, list.length) }, async () => {
+      while (idx < list.length) await processPage(list[idx++]);
+    }));
+  };
+  await runPool(mainPages);   // children first
+  await runPool(landingPages); // then section landing pages that link them
 
   // --- Remove stale pages (dropped from the plan since the last run) ---
   for (const rel of Object.keys(state.pages)) {
@@ -282,6 +334,100 @@ function buildFilesBlock(repoDir, page, scan, budget) {
   state.model = modelName;
   state.generatedAt = new Date().toISOString();
   saveState();
+
+  // --- Catalog + navigable index (meta layer) ---
+  const landingByDir = new Map();
+  for (const p of pages) if (p._landing) landingByDir.set(dirOf(p.path), p.path);
+  const catalog = {
+    repo: scan.name,
+    model: modelName,
+    language,
+    generatedAt: state.generatedAt,
+    pages: pages.map(p => {
+      const d = dirOf(p.path);
+      const parent = (!p._landing && landingByDir.has(d)) ? landingByDir.get(d) : null;
+      return {
+        path: p.path,
+        title: p.title,
+        description: p._desc0 || p.description || '',
+        dependent_files: p.files || [],
+        parent,
+        isLanding: !!p._landing,
+      };
+    }),
+  };
+  fs.mkdirSync(metaDir, { recursive: true });
+  fs.writeFileSync(path.join(metaDir, 'catalog.json'), JSON.stringify(catalog, null, 2));
+
+  // Human-navigable index that works in any markdown viewer.
+  const idx = [`# ${scan.name} — Wiki`, ''];
+  for (const p of pages.filter(pg => !dirOf(pg.path))) idx.push(`- [${p.title}](${p.path})`);
+  for (const d of [...pagesByDir.keys()].filter(Boolean).sort()) {
+    const group = pagesByDir.get(d);
+    const landing = group.find(p => p._landing);
+    const children = group.filter(p => !p._landing);
+    if (landing) {
+      idx.push(`- [${landing.title}](${landing.path})`);
+      for (const c of children) idx.push(`  - [${c.title}](${c.path})`);
+    } else {
+      idx.push(`- **${titleCase(d)}**`);
+      for (const c of children) idx.push(`  - [${c.title}](${c.path})`);
+    }
+  }
+  fs.writeFileSync(path.join(outDir, 'index.md'), idx.join('\n') + '\n');
+  console.log(`  catalog + index written -> ${path.relative(repoDir, metaDir)}`);
+
+  // --- Optional knowledge-card layer (opt-in via --knowledge / config.knowledge) ---
+  if (args.knowledge || config.knowledge) {
+    console.log('\nGenerating knowledge cards...');
+    const modules = moduleMap(scan);
+    const cardNames = Object.keys(KNOWLEDGE_CARDS);
+    fs.mkdirSync(knowledgeBase, { recursive: true });
+    const yaml = [
+      'schema_version: 1',
+      `locale: ${language}`,
+      `generated_at: "${state.generatedAt}"`,
+      'nodes_managed: true',
+      'modules:',
+    ];
+    for (const m of modules) {
+      yaml.push(`    "${m.key}":`);
+      yaml.push(`        dir_name: ${m.dir}`);
+      yaml.push(`        title: ${m.title}`);
+      yaml.push('        scope:');
+      for (const f of m.scope) yaml.push(`            - ${f}`);
+      yaml.push('        children:');
+      for (const c of m.children) yaml.push(`            - ${c}`);
+    }
+    fs.writeFileSync(path.join(knowledgeBase, '_index.yaml'), yaml.join('\n') + '\n');
+
+    let kok = 0, kfail = 0;
+    for (const m of modules) {
+      const dir = path.join(knowledgeBase, m.dir);
+      fs.mkdirSync(dir, { recursive: true });
+      const mod = [
+        'schema_version: 1',
+        `module_path: "${m.path}"`,
+        `title: ${m.title}`,
+        'scope:',
+        ...m.scope.map(f => `    - ${f}`),
+      ];
+      fs.writeFileSync(path.join(dir, '_module.yaml'), mod.join('\n') + '\n');
+      const { block, attached } = buildFilesBlock(repoDir, { files: m.scope }, scan, contextChars);
+      for (const card of cardNames) {
+        try {
+          const raw = await chat(profile, knowledgeMessages(scan, m, block, { language, card }), { maxTokens: profile.maxTokens });
+          fs.writeFileSync(path.join(dir, `${card}.md`), unwrapMarkdown(raw) + '\n');
+          kok++;
+        } catch (err) {
+          kfail++;
+          console.log(`  FAIL  ${m.dir}/${card}: ${err.message.split('\n')[0]}`);
+        }
+      }
+      console.log(`  card set: ${m.dir} (${attached.length} source files)`);
+    }
+    console.log(`  knowledge: ${kok} cards written, ${kfail} failed -> ${path.relative(repoDir, knowledgeBase)}`);
+  }
 
   console.log(`\nDone: ${ok} generated, ${skipped} skipped, ${failed} failed -> ${outDir}`);
   console.log(`Tip: export to PDF with  node ${path.join(__dirname, 'export.js')} ${outDir} ${path.join(repoDir, 'wiki-pdf')}`);

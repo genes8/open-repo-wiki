@@ -63,6 +63,8 @@ function htmlTemplate(title, markdown) {
   .mermaid { text-align: center; margin: 16px 0; }
   .mermaid svg { max-width: 100%; height: auto; }
   pre { white-space: pre-wrap; word-wrap: break-word; }
+  cite { display: block; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+         padding: 8px 12px; margin: 0 0 16px; font-style: normal; font-size: 13px; }
   @media print {
     .markdown-body { max-width: none; padding: 0; }
     h1, h2, h3 { break-after: avoid; }
@@ -105,7 +107,9 @@ function htmlTemplate(title, markdown) {
 }
 
 (async () => {
-  const files = walk(SRC).sort();
+  // The generator's root index.md is navigation source only; we emit index.html
+  // ourselves from the catalog, so skip it here to avoid an overwrite collision.
+  const files = walk(SRC).filter(f => path.relative(SRC, f) !== 'index.md').sort();
   console.log(`Found ${files.length} markdown files`);
   fs.mkdirSync(OUT, { recursive: true });
 
@@ -258,15 +262,46 @@ table{width:100%;border-collapse:collapse;font-size:12px}</style></head>
 
   await browser.close();
 
-  const links = indexEntries
-    .map(rel => `<li><a href="${encodeURI(rel)}.html">${rel}</a> &nbsp;<a href="${encodeURI(rel)}.pdf">[pdf]</a></li>`)
-    .join('\n');
+  const rendered = new Set(indexEntries);
+  const escHtml = (s) => String(s).replace(/</g, '&lt;');
+  const dirOfRel = (p) => { const i = p.lastIndexOf('/'); return i === -1 ? '' : p.slice(0, i); };
+  const htmlLink = (title, relPath) => {
+    const rel = relPath.replace(/\.md$/, '');
+    const pdf = rendered.has(rel) ? ` &nbsp;<a href="${encodeURI(rel)}.pdf">[pdf]</a>` : '';
+    return `<a href="${encodeURI(rel)}.html">${escHtml(title)}</a>${pdf}`;
+  };
+
+  // Prefer a nested, titled navigation built from the generator's catalog.json;
+  // fall back to a flat list (e.g. when exporting a Qoder repowiki that has none).
+  let navHtml;
+  let catalog = null;
+  try { catalog = JSON.parse(fs.readFileSync(path.join(SRC, '..', 'meta', 'catalog.json'), 'utf8')); } catch { /* no catalog */ }
+  if (catalog && Array.isArray(catalog.pages)) {
+    const pages = catalog.pages.filter(p => p.path && p.path !== 'index.md');
+    const byDir = new Map();
+    for (const p of pages) { const d = dirOfRel(p.path); if (!byDir.has(d)) byDir.set(d, []); byDir.get(d).push(p); }
+    const items = [];
+    for (const p of (byDir.get('') || [])) items.push(`<li>${htmlLink(p.title, p.path)}</li>`);
+    for (const d of [...byDir.keys()].filter(Boolean).sort()) {
+      const group = byDir.get(d);
+      const landing = group.find(p => p.isLanding);
+      const children = group.filter(p => !p.isLanding);
+      const head = landing ? htmlLink(landing.title, landing.path) : `<strong>${escHtml(d)}</strong>`;
+      const kids = children.map(c => `<li>${htmlLink(c.title, c.path)}</li>`).join('');
+      items.push(`<li>${head}<ul>${kids}</ul></li>`);
+    }
+    navHtml = `<ul>${items.join('\n')}</ul>`;
+  } else {
+    navHtml = `<ul>${indexEntries
+      .map(rel => `<li><a href="${encodeURI(rel)}.html">${escHtml(rel)}</a> &nbsp;<a href="${encodeURI(rel)}.pdf">[pdf]</a></li>`)
+      .join('\n')}</ul>`;
+  }
   fs.writeFileSync(
     path.join(OUT, 'index.html'),
     `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${projectName.replace(/</g, '&lt;')} — Wiki Export</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-light.min.css">
 <style>body{margin:0}.markdown-body{max-width:900px;margin:0 auto;padding:32px 40px}</style></head>
-<body><article class="markdown-body"><h1>Wiki Export</h1><p><a href=\"${COMPLETE_NAME}\"><strong>Complete wiki (single PDF)</strong></a></p><ul>${links}</ul></article></body></html>`
+<body><article class="markdown-body"><h1>Wiki Export</h1><p><a href=\"${COMPLETE_NAME}\"><strong>Complete wiki (single PDF)</strong></a></p>${navHtml}</article></body></html>`
   );
 
   // Record what we own so the next run only deletes files generated here
