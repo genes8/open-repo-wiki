@@ -21,6 +21,7 @@ const { scanRepo } = require('./lib/scan');
 const { chat, resolveApiKey } = require('./lib/providers');
 const { planMessages, pageMessages, knowledgeMessages, KNOWLEDGE_CARDS, extractJson } = require('./lib/prompts');
 const { moduleMap, titleCase } = require('./lib/modules');
+const { sanitizeCitations } = require('./lib/citations');
 
 const HELP = `Local Repo Wiki generator
 
@@ -272,6 +273,10 @@ function buildFilesBlock(repoDir, page, scan, budget) {
     if (args.pages && !page.path.includes(args.pages)) { skipped++; return; }
     const outFile = path.join(outDir, page.path);
     const { block, attached } = buildFilesBlock(repoDir, page, scan, contextChars);
+    // Record the validated (real, attached) subset so the catalog cites only
+    // files that actually reached the model — never the plan's raw wish-list,
+    // which may still contain hallucinated paths.
+    page._attached = attached;
     const hash = sha1([
       modelName, language, template, page.title, page.description || '',
       ...attached.map(rel => { try { return sha1(fs.readFileSync(path.join(repoDir, rel))); } catch { return rel; } }),
@@ -285,8 +290,15 @@ function buildFilesBlock(repoDir, page, scan, budget) {
     try {
       console.log(`  GEN   ${page.path} ...`);
       const raw = await chat(profile, pageMessages(scan, page, block, { language, attached, template }), { maxTokens: profile.maxTokens });
-      const md = unwrapMarkdown(raw);
+      let md = unwrapMarkdown(raw);
       if (md.length < 50) throw new Error('suspiciously short page output');
+      // Output-side guard: strip any structured citation the model may have
+      // emitted to a path we never attached (input filtering can't catch this).
+      if (attached.length) {
+        const san = sanitizeCitations(md, attached);
+        md = san.md;
+        if (san.dropped) console.log(`  note  ${page.path}: dropped ${san.dropped} ungrounded citation(s)`);
+      }
       fs.mkdirSync(path.dirname(outFile), { recursive: true });
       fs.writeFileSync(outFile, md + '\n');
       state.pages[page.path] = hash;
@@ -350,7 +362,9 @@ function buildFilesBlock(repoDir, page, scan, budget) {
         path: p.path,
         title: p.title,
         description: p._desc0 || p.description || '',
-        dependent_files: p.files || [],
+        // Real files that reached the model, not the plan's raw list (which may
+        // still name paths that don't exist in the repo).
+        dependent_files: p._attached || (p.files || []).filter(f => scan.fileSet.has(f)),
         parent,
         isLanding: !!p._landing,
       };
