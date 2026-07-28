@@ -1,0 +1,11 @@
+node_modules/
+
+# generated wiki + PDF output
+.local-wiki/
+wiki-pdf/
+.local-wiki-plan-error.txt
+
+# test artifacts
+test/fixture-repo/
+
+.DS_Store

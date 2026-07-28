@@ -1,0 +1,14 @@
+{
+  "default": "mock",
+  "language": "en",
+  "maxPages": 10,
+  "models": {
+    "mock": {
+      "provider": "openai",
+      "baseUrl": "http://127.0.0.1:8688/v1",
+      "model": "mock-1",
+      "contextChars": 20000,
+      "maxTokens": 2048
+    }
+  }
+}

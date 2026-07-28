@@ -1,0 +1,24 @@
+{
+  "name": "open-repo-wiki",
+  "version": "1.0.0",
+  "description": "Generate a documentation wiki for any repository with any AI model — local (Ollama, LM Studio, llama.cpp, GGUF in-process) or online (Zhipu GLM, Moonshot Kimi, any OpenAI-compatible API) — and export it to PDF.",
+  "main": "generate.js",
+  "bin": {
+    "open-repo-wiki": "./generate.js",
+    "open-repo-wiki-export": "./export.js"
+  },
+  "scripts": {
+    "generate": "node generate.js",
+    "export": "node export.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "optionalDependencies": {
+    "node-llama-cpp": "^3.19.1",
+    "pdf-lib": "^1.17.1",
+    "playwright": "^1.62.0"
+  },
+  "optionalDependenciesNote": "The wiki generator itself has ZERO runtime dependencies (Node >= 18 built-in fetch). Optional packages: 'node-llama-cpp' enables the llamacpp provider (direct GGUF inference); 'playwright' + 'pdf-lib' enable export.js (PDF export). Install none of them with: npm install --omit=optional"
+}
