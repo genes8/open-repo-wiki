@@ -138,3 +138,12 @@ test('rejects overlapping and symlinked live targets', t => {
     /symlink/
   );
 });
+
+test('rejects a filesystem root as a publication target', () => {
+  assert.throws(
+    () => createRunTransaction([
+      { name: 'content', live: path.parse(process.cwd()).root },
+    ], 'run-root'),
+    /filesystem root/
+  );
+});
