@@ -215,3 +215,19 @@ test('accepts exact source-backed shell commands', () => {
   });
   assert.equal(codes(result).includes('ungrounded_command'), false);
 });
+
+test('does not combine separate source files to ground one shell command', () => {
+  const commandPage = validPage().replace(
+    /grounded\.$/,
+    'grounded.\n\n```bash\nnode --test test/*.test.js\n```\n\nFinal sentence.'
+  );
+  const result = validatePage(commandPage, {
+    ...context,
+    attached: ['lib/a.js', 'lib/b.js'],
+    rawByPath: {
+      'lib/a.js': 'node --test',
+      'lib/b.js': 'test/*.test.js',
+    },
+  });
+  assert.ok(codes(result).includes('ungrounded_command'));
+});
