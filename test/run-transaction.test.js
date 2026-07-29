@@ -54,6 +54,18 @@ test('prepare snapshots every live target into its stage', t => {
   );
 });
 
+test('prepare supports a missing live target beneath a missing parent', t => {
+  const fixture = transactionFixture(t);
+  const live = path.join(fixture.root, 'knowledge', 'en');
+  const tx = createRunTransaction([{ name: 'knowledge', live }], 'run-new');
+
+  tx.prepare();
+
+  assert.equal(fs.statSync(tx.stagePath('knowledge')).isDirectory(), true);
+  tx.abort();
+  assert.equal(fs.existsSync(live), false);
+});
+
 test('abort leaves live trees byte-identical', t => {
   const fixture = transactionFixture(t);
   const before = snapshotTree(fixture.root);
