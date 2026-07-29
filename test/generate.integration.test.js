@@ -267,6 +267,16 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   assert.match(invalidFlags.stderr, /--pages cannot be combined/);
   assert.equal(server.state.planRequests, planRequestsBeforeInvalidFlags);
 
+  const beforeDryRun = snapshotWiki(repo);
+  const dryRun = await runGenerator(repo, configPath, ['--dry-run']);
+  assert.equal(dryRun.code, 0, `${dryRun.stderr}\n${dryRun.stdout}`);
+  assert.deepEqual(snapshotWiki(repo), beforeDryRun);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(latestRunDir(repo), 'run.json'), 'utf8')).status,
+    'dry-run'
+  );
+  assert.deepEqual(transactionArtifacts(path.join(repo, '.local-wiki')), []);
+
   const first = await runGenerator(repo, configPath);
   assert.equal(first.code, 0, `${first.stderr}\n${first.stdout}`);
   assert.equal(server.state.repairRequests, 1);
