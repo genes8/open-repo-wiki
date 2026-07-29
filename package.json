@@ -9,7 +9,8 @@
   },
   "scripts": {
     "generate": "node generate.js",
-    "export": "node export.js"
+    "export": "node export.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=18"
