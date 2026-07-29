@@ -12,3 +12,6 @@ test/fixture-repo/
 .qoder/
 
 .DS_Store
+
+# isolated feature work
+.worktrees/
