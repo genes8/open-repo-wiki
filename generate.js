@@ -153,6 +153,61 @@ function atomicWrite(file, content) {
   }
 }
 
+function normalizePublishedMetadata(value, fallbackPath = '') {
+  if (!value || typeof value !== 'object') return null;
+  const pagePath = String(value.path || fallbackPath).trim();
+  const title = String(value.title || '').trim();
+  if (!pagePath || !title) return null;
+  return {
+    path: pagePath,
+    title,
+    description: String(value.description || ''),
+    dependent_files: [...new Set(
+      (Array.isArray(value.dependent_files) ? value.dependent_files : [])
+        .map(file => String(file))
+    )],
+    isLanding: value.isLanding === true,
+    child_paths: [...new Set(
+      (Array.isArray(value.child_paths) ? value.child_paths : [])
+        .map(child => String(child))
+    )],
+  };
+}
+
+function metadataFromCatalog(metaDir) {
+  let catalog;
+  try {
+    catalog = JSON.parse(fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8'));
+  } catch {
+    return new Map();
+  }
+  const result = new Map();
+  for (const page of Array.isArray(catalog.pages) ? catalog.pages : []) {
+    const metadata = normalizePublishedMetadata(page);
+    if (metadata) result.set(metadata.path, metadata);
+  }
+  for (const page of Array.isArray(catalog.pages) ? catalog.pages : []) {
+    const parent = String(page && page.parent || '');
+    const childPath = String(page && page.path || '');
+    const parentMetadata = result.get(parent);
+    if (parentMetadata && childPath && !parentMetadata.child_paths.includes(childPath)) {
+      parentMetadata.child_paths.push(childPath);
+    }
+  }
+  return result;
+}
+
+function snapshotPageMetadata(page, attached) {
+  return {
+    path: page.path,
+    title: page.title,
+    description: page._desc0 || page.description || '',
+    dependent_files: [...attached],
+    isLanding: !!page._landing,
+    child_paths: (page._children || []).map(child => child.path),
+  };
+}
+
 function collectKnowledgeEvidence(repoDir, scan) {
   const MAX_TOTAL = 4 * 1024 * 1024;
   const MAX_PER_FILE = 64 * 1024;
@@ -247,6 +302,15 @@ function collectKnowledgeEvidence(repoDir, scan) {
   let state = { model: modelName, pages: {} };
   try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch { /* first run */ }
   if (!state.pages) state.pages = {};
+  if (!state.pageMetadata || typeof state.pageMetadata !== 'object') {
+    state.pageMetadata = {};
+  }
+  const priorMetadataByPath = metadataFromCatalog(metaDir);
+  for (const [pagePath, value] of Object.entries(state.pageMetadata)) {
+    const metadata = normalizePublishedMetadata(value, pagePath);
+    if (metadata) priorMetadataByPath.set(pagePath, metadata);
+  }
+  state.pageMetadata = Object.fromEntries(priorMetadataByPath);
   // State is persisted after every page so an interrupted run resumes where it stopped
   const saveState = () => {
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
@@ -265,8 +329,61 @@ function collectKnowledgeEvidence(repoDir, scan) {
 
   const processPage = async (page) => {
     const outFile = path.join(outDir, page.path);
-    page._published = fs.existsSync(outFile);
-    if (args.pages && !page.path.includes(args.pages)) { skipped++; return; }
+    const existingMetadata = priorMetadataByPath.get(page.path) || null;
+    page._publishedMetadata = fs.existsSync(outFile) ? existingMetadata : null;
+    page._published = !!page._publishedMetadata;
+    const generationPage = page._landing
+      ? {
+        ...page,
+        _children: (page._children || [])
+          .filter(child => child._publishedMetadata)
+          .map(child => ({
+            ...child,
+            path: child._publishedMetadata.path,
+            title: child._publishedMetadata.title,
+            description: child._publishedMetadata.description,
+          })),
+      }
+      : page;
+    const {
+      block,
+      attached,
+      lineCounts,
+      rawByPath,
+    } = buildFilesBlock(repoDir, generationPage, scan, contextChars);
+    // Record the validated (real, attached) subset so the catalog cites only
+    // files that actually reached the model — never the plan's raw wish-list,
+    // which may still contain hallucinated paths.
+    page._attached = attached;
+    const currentMetadata = snapshotPageMetadata(generationPage, attached);
+    const hash = sha1([
+      GENERATION_SCHEMA_VERSION,
+      modelName,
+      language,
+      template,
+      generationPage.title,
+      generationPage.description || '',
+      JSON.stringify((generationPage._children || []).map(child => [child.path, child.title])),
+      ...attached.map(rel => JSON.stringify([rel, sha1(rawByPath[rel])])),
+    ].join('|'));
+
+    if (args.pages && !page.path.includes(args.pages)) {
+      if (state.pages[page.path] === hash && fs.existsSync(outFile)) {
+        page._publishedMetadata = currentMetadata;
+        page._published = true;
+        state.pageMetadata[page.path] = currentMetadata;
+      }
+      skipped++;
+      return;
+    }
+    if (!args.force && state.pages[page.path] === hash && fs.existsSync(outFile)) {
+      page._publishedMetadata = currentMetadata;
+      page._published = true;
+      state.pageMetadata[page.path] = currentMetadata;
+      skipped++;
+      console.log(`  SKIP  ${page.path} (unchanged)`);
+      return;
+    }
     if (page._landing) {
       const missing = (page._children || []).filter(child => !child._published);
       if (missing.length) {
@@ -278,33 +395,6 @@ function collectKnowledgeEvidence(repoDir, scan) {
         return;
       }
     }
-    const {
-      block,
-      attached,
-      lineCounts,
-      rawByPath,
-    } = buildFilesBlock(repoDir, page, scan, contextChars);
-    // Record the validated (real, attached) subset so the catalog cites only
-    // files that actually reached the model — never the plan's raw wish-list,
-    // which may still contain hallucinated paths.
-    page._attached = attached;
-    const hash = sha1([
-      GENERATION_SCHEMA_VERSION,
-      modelName,
-      language,
-      template,
-      page.title,
-      page.description || '',
-      JSON.stringify((page._children || []).map(child => [child.path, child.title])),
-      ...attached.map(rel => JSON.stringify([rel, sha1(rawByPath[rel])])),
-    ].join('|'));
-
-    if (!args.force && state.pages[page.path] === hash && fs.existsSync(outFile)) {
-      page._published = true;
-      skipped++;
-      console.log(`  SKIP  ${page.path} (unchanged)`);
-      return;
-    }
     try {
       console.log(`  GEN   ${page.path} ...`);
       const promptOptions = {
@@ -312,17 +402,17 @@ function collectKnowledgeEvidence(repoDir, scan) {
         attached,
         lineCounts,
         template,
-        profile: classifyPage(page),
+        profile: classifyPage(generationPage),
       };
       let rejected = '';
       let validation;
       let md = '';
       for (let attempt = 0; attempt < 3; attempt++) {
         const messages = attempt === 0
-          ? pageMessages(scan, page, block, promptOptions)
+          ? pageMessages(scan, generationPage, block, promptOptions)
           : repairPageMessages(
             scan,
-            page,
+            generationPage,
             block,
             rejected,
             validation.violations,
@@ -336,7 +426,11 @@ function collectKnowledgeEvidence(repoDir, scan) {
         rejected = unwrapMarkdown(raw);
         const citationResult = sanitizeCitations(rejected, attached, lineCounts);
         md = citationResult.md;
-        validation = validatePage(md, { page, attached, citationResult });
+        validation = validatePage(md, {
+          page: generationPage,
+          attached,
+          citationResult,
+        });
         if (citationResult.dropped) {
           console.log(
             `  note  ${page.path}: dropped ${citationResult.dropped} invalid citation item(s)`
@@ -351,13 +445,16 @@ function collectKnowledgeEvidence(repoDir, scan) {
         }
       }
       atomicWrite(outFile, `${md.trim()}\n`);
+      page._publishedMetadata = currentMetadata;
       page._published = true;
       state.pages[page.path] = hash;
+      state.pageMetadata[page.path] = currentMetadata;
       saveState();
       ok++;
       console.log(`  OK    ${page.path} (${md.length} chars, ${attached.length} source files)`);
     } catch (err) {
-      page._published = fs.existsSync(outFile);
+      page._publishedMetadata = fs.existsSync(outFile) ? existingMetadata : null;
+      page._published = !!page._publishedMetadata;
       failed++;
       console.log(`  FAIL  ${page.path}: ${err.message.split('\n')[0]}`);
     }
@@ -373,7 +470,11 @@ function collectKnowledgeEvidence(repoDir, scan) {
   await runPool(landingPages); // then section landing pages that link them
 
   // --- Remove stale pages (dropped from the plan since the last run) ---
-  for (const rel of Object.keys(state.pages)) {
+  const previouslyManagedPaths = new Set([
+    ...Object.keys(state.pages),
+    ...Object.keys(state.pageMetadata),
+  ]);
+  for (const rel of previouslyManagedPaths) {
     if (!currentPaths.has(rel)) {
       const full = path.join(outDir, rel);
       if (fs.existsSync(full)) {
@@ -381,6 +482,7 @@ function collectKnowledgeEvidence(repoDir, scan) {
         console.log(`  removed stale: ${rel}`);
       }
       delete state.pages[rel];
+      delete state.pageMetadata[rel];
     }
   }
   // prune now-empty subdirectories
@@ -401,25 +503,36 @@ function collectKnowledgeEvidence(repoDir, scan) {
   saveState();
 
   // --- Catalog + navigable index (meta layer) ---
-  const publishedPages = pages.filter(page => page._published);
-  const publishedPaths = new Set(publishedPages.map(page => page.path));
+  const publishedMetadata = pages
+    .map(page => page._publishedMetadata)
+    .filter(Boolean);
+  const publishedByPath = new Map(
+    publishedMetadata.map(metadata => [metadata.path, metadata])
+  );
+  const parentByChild = new Map();
+  for (const metadata of publishedMetadata) {
+    if (!metadata.isLanding) continue;
+    for (const childPath of metadata.child_paths) {
+      if (publishedByPath.has(childPath) && !parentByChild.has(childPath)) {
+        parentByChild.set(childPath, metadata.path);
+      }
+    }
+  }
   const catalog = {
     repo: scan.name,
     model: modelName,
     language,
     generatedAt: state.generatedAt,
-    pages: publishedPages.map(p => {
+    pages: publishedMetadata.map(metadata => {
       return {
-        path: p.path,
-        title: p.title,
-        description: p._desc0 || p.description || '',
-        // Real files that reached the model, not the plan's raw list (which may
-        // still name paths that don't exist in the repo).
-        dependent_files: p._attached || (p.files || []).filter(f => scan.fileSet.has(f)),
-        parent: publishedPaths.has(normalized.parentByPath.get(p.path))
-          ? normalized.parentByPath.get(p.path)
-          : null,
-        isLanding: !!p._landing,
+        path: metadata.path,
+        title: metadata.title,
+        description: metadata.description,
+        // These files belong to the exact last successfully published page,
+        // rather than to a newer plan whose generation may have failed.
+        dependent_files: metadata.dependent_files,
+        parent: parentByChild.get(metadata.path) || null,
+        isLanding: metadata.isLanding,
       };
     }),
   };
@@ -431,8 +544,12 @@ function collectKnowledgeEvidence(repoDir, scan) {
 
   // Human-navigable index that works in any markdown viewer.
   const idx = [`# ${scan.name} — Wiki`, ''];
-  const publishedByDir = groupPages(publishedPages);
-  for (const p of publishedPages.filter(pg => !dirOf(pg.path))) {
+  const indexPages = publishedMetadata.map(metadata => ({
+    ...metadata,
+    _landing: metadata.isLanding,
+  }));
+  const publishedByDir = groupPages(indexPages);
+  for (const p of indexPages.filter(pg => !dirOf(pg.path))) {
     idx.push(`- [${p.title}](${p.path})`);
   }
   for (const d of [...publishedByDir.keys()].filter(Boolean).sort()) {
@@ -441,7 +558,12 @@ function collectKnowledgeEvidence(repoDir, scan) {
     const children = group.filter(p => !p._landing);
     if (landing) {
       idx.push(`- [${landing.title}](${landing.path})`);
-      for (const c of children) idx.push(`  - [${c.title}](${c.path})`);
+      for (const c of children.filter(child => parentByChild.get(child.path) === landing.path)) {
+        idx.push(`  - [${c.title}](${c.path})`);
+      }
+      for (const orphan of children.filter(child => !parentByChild.has(child.path))) {
+        idx.push(`- [${orphan.title}](${orphan.path})`);
+      }
     } else {
       idx.push(`- **${titleCase(d)}**`);
       for (const c of children) idx.push(`  - [${c.title}](${c.path})`);

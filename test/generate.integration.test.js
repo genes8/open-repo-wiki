@@ -16,7 +16,7 @@ function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function runGenerator(repo, config) {
+function runGenerator(repo, config, extraArgs = []) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
       GENERATOR,
@@ -26,6 +26,7 @@ function runGenerator(repo, config) {
       '--knowledge',
       '--concurrency',
       '1',
+      ...extraArgs,
     ], {
       cwd: APP_DIR,
       env: { ...process.env },
@@ -218,6 +219,81 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   );
   assert.match(identityPage, /\[lib\/b\.js\]\(lib\/b\.js\)/);
   assert.doesNotMatch(identityPage, /\[lib\/a\.js\]\(lib\/a\.js\)/);
+
+  startPlan.title = 'Renamed Start';
+  behavior.alwaysFailTitle = 'Renamed Start';
+  const failedChildRename = await runGenerator(repo, configPath);
+  assert.equal(
+    failedChildRename.code,
+    1,
+    `${failedChildRename.stderr}\n${failedChildRename.stdout}`
+  );
+  assert.doesNotMatch(fs.readFileSync(landingPath, 'utf8'), /Renamed Start/);
+  const failedRenameCatalog = JSON.parse(
+    fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
+  );
+  assert.equal(
+    failedRenameCatalog.pages.find(page => page.path === 'guides/start.md').title,
+    'Start'
+  );
+  startPlan.title = 'Start';
+  behavior.alwaysFailTitle = null;
+  const restoreStart = await runGenerator(repo, configPath);
+  assert.equal(restoreStart.code, 0, `${restoreStart.stderr}\n${restoreStart.stdout}`);
+
+  plan.pages.push({
+    path: 'guides/added.md',
+    title: 'Added',
+    description: 'A new child whose landing regeneration will fail.',
+    files: ['README.md'],
+  });
+  behavior.alwaysFailTitle = 'Guides';
+  const failedLanding = await runGenerator(repo, configPath);
+  assert.equal(failedLanding.code, 1, `${failedLanding.stderr}\n${failedLanding.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/added.md')), true);
+  assert.doesNotMatch(fs.readFileSync(landingPath, 'utf8'), /Added|added\.md/);
+  const failedLandingCatalog = JSON.parse(
+    fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
+  );
+  assert.equal(
+    failedLandingCatalog.pages.find(page => page.path === 'guides/added.md').parent,
+    null
+  );
+  const failedLandingIndex = fs.readFileSync(path.join(contentDir, 'index.md'), 'utf8');
+  assert.match(failedLandingIndex, /^- \[Added]\(guides\/added\.md\)$/m);
+  assert.doesNotMatch(failedLandingIndex, /^  - \[Added]/m);
+  plan.pages.pop();
+  behavior.alwaysFailTitle = null;
+  const removeAdded = await runGenerator(repo, configPath);
+  assert.equal(removeAdded.code, 0, `${removeAdded.stderr}\n${removeAdded.stdout}`);
+
+  plan.pages.push({
+    path: 'guides/selective.md',
+    title: 'Selective',
+    description: 'A child generated through the page selector.',
+    files: ['README.md'],
+  });
+  const selective = await runGenerator(
+    repo,
+    configPath,
+    ['--pages', 'guides/selective.md']
+  );
+  assert.equal(selective.code, 0, `${selective.stderr}\n${selective.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/selective.md')), true);
+  assert.doesNotMatch(fs.readFileSync(landingPath, 'utf8'), /Selective|selective\.md/);
+  const selectiveCatalog = JSON.parse(
+    fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
+  );
+  assert.equal(
+    selectiveCatalog.pages.find(page => page.path === 'guides/selective.md').parent,
+    null
+  );
+  const selectiveIndex = fs.readFileSync(path.join(contentDir, 'index.md'), 'utf8');
+  assert.match(selectiveIndex, /^- \[Selective]\(guides\/selective\.md\)$/m);
+  assert.doesNotMatch(selectiveIndex, /^  - \[Selective]/m);
+  plan.pages.pop();
+  const removeSelective = await runGenerator(repo, configPath);
+  assert.equal(removeSelective.code, 0, `${removeSelective.stderr}\n${removeSelective.stdout}`);
 
   plan.pages.push({
     path: 'guides/broken.md',

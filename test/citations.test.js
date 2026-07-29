@@ -95,3 +95,15 @@ test('structured bullets cannot hide a second unvalidated citation link', () => 
   assert.doesNotMatch(result.md, /lib\/missing\.js/);
   assert.doesNotMatch(result.md, /\*\*Section sources\*\*/);
 });
+
+test('non-bullet links inside cite blocks cannot bypass validation', () => {
+  const md = `<cite>
+**Referenced Files in This Document**
+- [lib/a.js](lib/a.js)
+[hidden](lib/missing.js)
+</cite>`;
+  const result = sanitizeCitations(md, attached, lineCounts);
+
+  assert.ok(result.violations.some(item => item.code === 'citation_item_format'));
+  assert.doesNotMatch(result.md, /lib\/missing\.js/);
+});
