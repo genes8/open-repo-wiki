@@ -6,7 +6,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { createMockServer } = require('./mock-llm');
+const {
+  createMockServer,
+  defaultKnowledgeResponse,
+} = require('./mock-llm');
 const { parseRangeTarget } = require('../lib/citations');
 
 const APP_DIR = path.resolve(__dirname, '..');
@@ -44,6 +47,63 @@ function physicalLineCount(text) {
   if (!text) return 0;
   const count = text.split('\n').length;
   return text.endsWith('\n') ? count - 1 : count;
+}
+
+function snapshotTree(root) {
+  if (!fs.existsSync(root)) return null;
+  const stat = fs.lstatSync(root);
+  if (stat.isSymbolicLink()) return { type: 'symlink', target: fs.readlinkSync(root) };
+  if (stat.isFile()) return { type: 'file', bytes: fs.readFileSync(root).toString('base64') };
+  const entries = {};
+  for (const name of fs.readdirSync(root).sort()) {
+    entries[name] = snapshotTree(path.join(root, name));
+  }
+  return { type: 'directory', entries };
+}
+
+function snapshotWiki(repo) {
+  const base = path.join(repo, '.local-wiki');
+  return {
+    content: snapshotTree(path.join(base, 'en/content')),
+    meta: snapshotTree(path.join(base, 'en/meta')),
+    knowledge: snapshotTree(path.join(base, 'knowledge/en')),
+  };
+}
+
+function latestRunDir(repo) {
+  const runs = path.join(repo, '.local-wiki/runs');
+  const names = fs.readdirSync(runs).sort();
+  assert.ok(names.length > 0, 'expected at least one diagnostics run');
+  return path.join(runs, names.at(-1));
+}
+
+function filesUnder(root) {
+  if (!fs.existsSync(root)) return [];
+  const files = [];
+  const visit = current => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) visit(full);
+      else files.push(full);
+    }
+  };
+  visit(root);
+  return files.sort();
+}
+
+function transactionArtifacts(root) {
+  if (!fs.existsSync(root)) return [];
+  const found = [];
+  const visit = current => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (/\.stage-|\.backup-/.test(entry.name)) found.push(path.join(current, entry.name));
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        visit(path.join(current, entry.name));
+      }
+    }
+  };
+  visit(root);
+  return found;
 }
 
 test('generator repairs, grounds, preserves last good pages, and skips unchanged sources', async t => {
@@ -105,6 +165,9 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   const behavior = {
     rejectedOverview: false,
     alwaysFailTitle: null,
+    failKnowledge: false,
+    planSequence: null,
+    finishReasonTitle: null,
   };
   const refusal = [
     '# Refused',
@@ -114,6 +177,10 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   ].join('\n');
   const server = createMockServer({
     plan,
+    planResponder: ({ defaultPlan }) => {
+      if (!behavior.planSequence) return defaultPlan;
+      return behavior.planSequence.shift() || defaultPlan;
+    },
     pageResponder: context => {
       if (behavior.alwaysFailTitle === context.title) return refusal;
       if (context.title === 'Project Overview'
@@ -123,6 +190,14 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
         return refusal;
       }
       return context.defaultResponse();
+    },
+    knowledgeResponder: context => {
+      if (behavior.failKnowledge) return refusal;
+      return defaultKnowledgeResponse(context);
+    },
+    finishReasonResponder: ({ kind, title }) => {
+      if (kind === 'page' && behavior.finishReasonTitle === title) return 'length';
+      return 'stop';
     },
   });
   await new Promise((resolve, reject) => {
@@ -180,6 +255,16 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     },
     pageMetadata: {},
   });
+
+  const planRequestsBeforeInvalidFlags = server.state.planRequests;
+  const invalidFlags = await runGenerator(repo, configPath, [
+    '--pages',
+    'overview.md',
+    '--prune',
+  ]);
+  assert.equal(invalidFlags.code, 1);
+  assert.match(invalidFlags.stderr, /--pages cannot be combined/);
+  assert.equal(server.state.planRequests, planRequestsBeforeInvalidFlags);
 
   const first = await runGenerator(repo, configPath);
   assert.equal(first.code, 0, `${first.stderr}\n${first.stdout}`);
@@ -241,6 +326,66 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     assert.match(card, /\nsource_files:/, relative);
   }
 
+  const collapsedPlan = {
+    pages: [{
+      path: 'overview.md',
+      title: 'Project Overview',
+      description: 'A suspiciously collapsed plan.',
+      files: ['README.md'],
+    }],
+  };
+  behavior.planSequence = [collapsedPlan, plan];
+  const repairedPlanRun = await runGenerator(repo, configPath);
+  assert.equal(repairedPlanRun.code, 0, repairedPlanRun.stderr);
+  assert.equal(server.state.lastPlanRunRequests, 2);
+
+  const liveBeforeRejectedPlans = snapshotWiki(repo);
+  behavior.planSequence = [collapsedPlan, collapsedPlan, collapsedPlan];
+  const rejectedPlans = await runGenerator(repo, configPath);
+  assert.equal(rejectedPlans.code, 1);
+  assert.deepEqual(snapshotWiki(repo), liveBeforeRejectedPlans);
+  assert.equal(server.state.lastPlanRunRequests, 3);
+  const rejectedPlanDiagnostics = latestRunDir(repo);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    assert.equal(fs.existsSync(path.join(
+      rejectedPlanDiagnostics,
+      `plan/attempt-${attempt}.raw.txt`
+    )), true);
+  }
+  const planAttempt = JSON.parse(fs.readFileSync(
+    path.join(rejectedPlanDiagnostics, 'plan/attempt-3.json'),
+    'utf8'
+  ));
+  assert.equal(planAttempt.finishReason, 'stop');
+  assert.ok(planAttempt.violations.some(item => item.code === 'plan_page_regression'));
+  assert.equal(JSON.parse(fs.readFileSync(
+    path.join(rejectedPlanDiagnostics, 'run.json'),
+    'utf8'
+  )).status, 'aborted');
+  behavior.planSequence = null;
+
+  const beforeKnowledgeFailure = snapshotWiki(repo);
+  const pageRequestsBeforeKnowledgeFailure = server.state.pageRequests;
+  behavior.failKnowledge = true;
+  const failedKnowledge = await runGenerator(repo, configPath, ['--force']);
+  assert.equal(failedKnowledge.code, 1, `${failedKnowledge.stderr}\n${failedKnowledge.stdout}`);
+  assert.ok(server.state.pageRequests > pageRequestsBeforeKnowledgeFailure);
+  assert.deepEqual(snapshotWiki(repo), beforeKnowledgeFailure);
+  const failedKnowledgeRun = latestRunDir(repo);
+  const failedKnowledgeSummary = JSON.parse(fs.readFileSync(
+    path.join(failedKnowledgeRun, 'run.json'),
+    'utf8'
+  ));
+  assert.equal(failedKnowledgeSummary.status, 'aborted');
+  assert.ok(failedKnowledgeSummary.knowledgeFailures > 0);
+  const knowledgeAttemptFile = filesUnder(path.join(failedKnowledgeRun, 'knowledge'))
+    .find(file => file.endsWith('attempt-1.json'));
+  assert.ok(knowledgeAttemptFile);
+  const knowledgeAttempt = JSON.parse(fs.readFileSync(knowledgeAttemptFile, 'utf8'));
+  assert.equal(knowledgeAttempt.finishReason, 'stop');
+  assert.ok(knowledgeAttempt.violations.some(item => item.code === 'knowledge_refusal'));
+  behavior.failKnowledge = false;
+
   const startPlan = plan.pages.find(page => page.path === 'guides/start.md');
   const startCallsBeforeIdentityChange = server.state.byTitle.Start;
   startPlan.files = ['README.md', 'lib/b.js'];
@@ -256,12 +401,14 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
 
   startPlan.title = 'Renamed Start';
   behavior.alwaysFailTitle = 'Renamed Start';
+  const beforeFailedChildRename = snapshotWiki(repo);
   const failedChildRename = await runGenerator(repo, configPath);
   assert.equal(
     failedChildRename.code,
     1,
     `${failedChildRename.stderr}\n${failedChildRename.stdout}`
   );
+  assert.deepEqual(snapshotWiki(repo), beforeFailedChildRename);
   assert.doesNotMatch(fs.readFileSync(landingPath, 'utf8'), /Renamed Start/);
   const failedRenameCatalog = JSON.parse(
     fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
@@ -284,18 +431,17 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   behavior.alwaysFailTitle = 'Guides';
   const failedLanding = await runGenerator(repo, configPath);
   assert.equal(failedLanding.code, 1, `${failedLanding.stderr}\n${failedLanding.stdout}`);
-  assert.equal(fs.existsSync(path.join(contentDir, 'guides/added.md')), true);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/added.md')), false);
   assert.doesNotMatch(fs.readFileSync(landingPath, 'utf8'), /Added|added\.md/);
   const failedLandingCatalog = JSON.parse(
     fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
   );
   assert.equal(
-    failedLandingCatalog.pages.find(page => page.path === 'guides/added.md').parent,
-    null
+    failedLandingCatalog.pages.some(page => page.path === 'guides/added.md'),
+    false
   );
   const failedLandingIndex = fs.readFileSync(path.join(contentDir, 'index.md'), 'utf8');
-  assert.match(failedLandingIndex, /^- \[Added]\(guides\/added\.md\)$/m);
-  assert.doesNotMatch(failedLandingIndex, /^  - \[Added]/m);
+  assert.doesNotMatch(failedLandingIndex, /Added|added\.md/);
   plan.pages.pop();
   behavior.alwaysFailTitle = null;
   const removeAdded = await runGenerator(repo, configPath);
@@ -328,6 +474,15 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   plan.pages.pop();
   const removeSelective = await runGenerator(repo, configPath);
   assert.equal(removeSelective.code, 0, `${removeSelective.stderr}\n${removeSelective.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/selective.md')), true);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8'))
+      .pages.some(page => page.path === 'guides/selective.md'),
+    true
+  );
+  const pruneSelective = await runGenerator(repo, configPath, ['--prune']);
+  assert.equal(pruneSelective.code, 0, `${pruneSelective.stderr}\n${pruneSelective.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/selective.md')), false);
 
   plan.pages.push({
     path: 'guides/broken.md',
@@ -359,22 +514,48 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   const protectedPage = path.join(contentDir, 'guides/start.md');
   const lastKnownGood = fs.readFileSync(protectedPage);
   fs.appendFileSync(path.join(repo, 'lib/b.js'), '// changed source\n');
-  behavior.alwaysFailTitle = 'Start';
+  behavior.finishReasonTitle = 'Start';
   const repairCountBeforeFailure = server.state.repairRequests;
+  const beforeTruncatedPage = snapshotWiki(repo);
   const failed = await runGenerator(repo, configPath);
   assert.equal(failed.code, 1, `${failed.stderr}\n${failed.stdout}`);
   assert.equal(server.state.repairRequests - repairCountBeforeFailure, 2);
   assert.deepEqual(fs.readFileSync(protectedPage), lastKnownGood);
+  assert.deepEqual(snapshotWiki(repo), beforeTruncatedPage);
   assert.equal(
     fs.readdirSync(path.dirname(protectedPage)).some(name => name.includes('.tmp-')),
     false
   );
+  const truncatedPageRun = latestRunDir(repo);
+  const truncatedAttempt = JSON.parse(fs.readFileSync(
+    path.join(truncatedPageRun, 'pages/guides/start/attempt-3.json'),
+    'utf8'
+  ));
+  assert.equal(truncatedAttempt.finishReason, 'length');
+  assert.ok(truncatedAttempt.violations.some(
+    item => item.code === 'completion_truncated'
+  ));
 
-  behavior.alwaysFailTitle = null;
+  behavior.finishReasonTitle = null;
   const recovered = await runGenerator(repo, configPath);
   assert.equal(recovered.code, 0, `${recovered.stderr}\n${recovered.stdout}`);
   const unchanged = await runGenerator(repo, configPath);
   assert.equal(unchanged.code, 0, `${unchanged.stderr}\n${unchanged.stdout}`);
   const skipped = unchanged.stdout.match(/\bSKIP\b/g) || [];
   assert.equal(skipped.length, catalog.pages.length, unchanged.stdout);
+
+  behavior.planSequence = [collapsedPlan];
+  const planRequestsBeforeAcceptedShrink = server.state.planRequests;
+  const acceptedShrink = await runGenerator(repo, configPath, ['--accept-plan-shrink']);
+  assert.equal(acceptedShrink.code, 0, `${acceptedShrink.stderr}\n${acceptedShrink.stdout}`);
+  assert.equal(server.state.planRequests - planRequestsBeforeAcceptedShrink, 1);
+  assert.equal(fs.existsSync(path.join(contentDir, 'overview.md')), true);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/configuration.md')), false);
+  assert.deepEqual(transactionArtifacts(path.join(repo, '.local-wiki')), []);
+  const finalState = JSON.parse(
+    fs.readFileSync(path.join(contentDir, '.state.json'), 'utf8')
+  );
+  assert.equal(finalState.generationSchemaVersion, 3);
+  assert.equal(finalState.lastSuccessfulPlan.length, 1);
+  assert.ok(finalState.lastRunId);
 });

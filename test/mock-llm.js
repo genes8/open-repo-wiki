@@ -77,7 +77,7 @@ function defaultPageResponse({ title, userMessage }) {
       additions.push('**Section sources**', range[0]);
     }
     sections.push(
-      `## Section ${index + 1}\n\n${additions.length ? `${additions.join('\n')}\n\n` : ''}${body}`
+      `## Section ${index + 1}\n\n${additions.length ? `${additions.join('\n')}\n\n` : ''}${body}.`
     );
   }
 
@@ -99,8 +99,10 @@ function defaultKnowledgeResponse({ cardName }) {
 
 function createMockServer({
   plan = DEFAULT_PLAN,
+  planResponder,
   pageResponder = defaultPageResponse,
   knowledgeResponder = defaultKnowledgeResponse,
+  finishReasonResponder = () => 'stop',
   delay = 0,
 } = {}) {
   const state = {
@@ -109,6 +111,7 @@ function createMockServer({
     pageRequests: 0,
     repairRequests: 0,
     knowledgeRequests: 0,
+    lastPlanRunRequests: 0,
     byTitle: {},
   };
 
@@ -135,19 +138,46 @@ function createMockServer({
         state.requests++;
 
         let content;
+        let responseContext;
         if (/valid JSON only/i.test(systemMessage)) {
+          const isRepair = /repairing a rejected wiki plan/i.test(systemMessage);
+          if (!isRepair) state.lastPlanRunRequests = 0;
           state.planRequests++;
-          content = `Here is the plan:\n\`\`\`json\n${JSON.stringify(plan)}\n\`\`\``;
+          state.lastPlanRunRequests++;
+          const chosen = planResponder
+            ? await planResponder({
+              attempt: state.lastPlanRunRequests,
+              defaultPlan: plan,
+              payload,
+              state,
+              systemMessage,
+              userMessage,
+            })
+            : plan;
+          content = typeof chosen === 'string'
+            ? chosen
+            : `Here is the plan:\n\`\`\`json\n${JSON.stringify(chosen)}\n\`\`\``;
+          responseContext = {
+            kind: 'plan',
+            title: null,
+            attempt: state.lastPlanRunRequests,
+          };
         } else if (/knowledge card/i.test(systemMessage)) {
           state.knowledgeRequests++;
           const cardMatch = userMessage.match(/Card: "([^"]+)"/);
+          const cardName = cardMatch && cardMatch[1];
           content = await knowledgeResponder({
-            cardName: cardMatch && cardMatch[1],
+            cardName,
             payload,
             state,
             systemMessage,
             userMessage,
           });
+          responseContext = {
+            kind: 'knowledge',
+            title: cardName,
+            attempt: state.knowledgeRequests,
+          };
         } else {
           const title = extractTitle(userMessage);
           const isRepair = /repairing a rejected draft/i.test(systemMessage);
@@ -163,11 +193,28 @@ function createMockServer({
             userMessage,
             defaultResponse: () => defaultPageResponse({ title, userMessage }),
           });
+          responseContext = {
+            kind: 'page',
+            title,
+            attempt: state.byTitle[title],
+          };
         }
 
+        const finishReason = await finishReasonResponder({
+          ...responseContext,
+          payload,
+          state,
+        });
         response.writeHead(200, { 'content-type': 'application/json' });
         const reply = JSON.stringify({
-          choices: [{ message: { role: 'assistant', content: String(content) } }],
+          choices: [{
+            finish_reason: finishReason || null,
+            message: { role: 'assistant', content: String(content) },
+          }],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 20,
+          },
         });
         setTimeout(() => response.end(reply), delay);
       } catch (error) {
