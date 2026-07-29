@@ -153,23 +153,44 @@ function atomicWrite(file, content) {
   }
 }
 
+function canonicalRelativePath(value, { markdown = false } = {}) {
+  const raw = String(value || '').trim();
+  if (!raw
+    || raw.includes('\\')
+    || raw.includes('\0')
+    || path.posix.isAbsolute(raw)
+    || path.win32.isAbsolute(raw)
+    || path.posix.normalize(raw) !== raw
+    || raw === '.'
+    || (markdown && !raw.toLowerCase().endsWith('.md'))) {
+    return null;
+  }
+  return raw;
+}
+
 function normalizePublishedMetadata(value, fallbackPath = '') {
   if (!value || typeof value !== 'object') return null;
-  const pagePath = String(value.path || fallbackPath).trim();
+  const pagePath = canonicalRelativePath(fallbackPath || value.path, { markdown: true });
   const title = String(value.title || '').trim();
   if (!pagePath || !title) return null;
+  if (fallbackPath && value.path
+    && canonicalRelativePath(value.path, { markdown: true }) !== pagePath) {
+    return null;
+  }
   return {
     path: pagePath,
     title,
     description: String(value.description || ''),
     dependent_files: [...new Set(
       (Array.isArray(value.dependent_files) ? value.dependent_files : [])
-        .map(file => String(file))
+        .map(file => canonicalRelativePath(file))
+        .filter(Boolean)
     )],
     isLanding: value.isLanding === true,
     child_paths: [...new Set(
       (Array.isArray(value.child_paths) ? value.child_paths : [])
-        .map(child => String(child))
+        .map(child => canonicalRelativePath(child, { markdown: true }))
+        .filter(Boolean)
     )],
   };
 }
@@ -187,8 +208,8 @@ function metadataFromCatalog(metaDir) {
     if (metadata) result.set(metadata.path, metadata);
   }
   for (const page of Array.isArray(catalog.pages) ? catalog.pages : []) {
-    const parent = String(page && page.parent || '');
-    const childPath = String(page && page.path || '');
+    const parent = canonicalRelativePath(page && page.parent, { markdown: true });
+    const childPath = canonicalRelativePath(page && page.path, { markdown: true });
     const parentMetadata = result.get(parent);
     if (parentMetadata && childPath && !parentMetadata.child_paths.includes(childPath)) {
       parentMetadata.child_paths.push(childPath);
@@ -476,10 +497,13 @@ function collectKnowledgeEvidence(repoDir, scan) {
   ]);
   for (const rel of previouslyManagedPaths) {
     if (!currentPaths.has(rel)) {
-      const full = path.join(outDir, rel);
-      if (fs.existsSync(full)) {
-        fs.unlinkSync(full);
-        console.log(`  removed stale: ${rel}`);
+      const managed = safeManagedPath(outDir, rel);
+      if (managed && fs.existsSync(managed.full)) {
+        const stat = fs.lstatSync(managed.full);
+        if (stat.isFile() || stat.isSymbolicLink()) {
+          fs.unlinkSync(managed.full);
+          console.log(`  removed stale: ${managed.rel}`);
+        }
       }
       delete state.pages[rel];
       delete state.pageMetadata[rel];

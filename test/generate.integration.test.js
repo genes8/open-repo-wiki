@@ -149,13 +149,47 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     },
   });
 
-  const first = await runGenerator(repo, configPath);
-  assert.equal(first.code, 0, `${first.stderr}\n${first.stdout}`);
-  assert.equal(server.state.repairRequests, 1);
-
   const contentDir = path.join(repo, '.local-wiki/en/content');
   const metaDir = path.join(repo, '.local-wiki/en/meta');
   const knowledgeDir = path.join(repo, '.local-wiki/knowledge/en');
+  const traversalVictim = path.join(repo, 'traversal-victim.md');
+  const linkedOutside = path.join(repo, 'linked-outside');
+  fs.mkdirSync(contentDir, { recursive: true });
+  fs.mkdirSync(metaDir, { recursive: true });
+  fs.mkdirSync(linkedOutside);
+  fs.writeFileSync(traversalVictim, 'must survive');
+  fs.writeFileSync(path.join(linkedOutside, 'victim.md'), 'must also survive');
+  fs.symlinkSync(linkedOutside, path.join(contentDir, 'linked'), 'dir');
+  const traversalPath = path.relative(contentDir, traversalVictim);
+  writeJson(path.join(metaDir, 'catalog.json'), {
+    pages: [
+      {
+        path: traversalPath,
+        title: 'Traversal victim',
+      },
+      {
+        path: 'linked/victim.md',
+        title: 'Symlink victim',
+      },
+    ],
+  });
+  writeJson(path.join(contentDir, '.state.json'), {
+    pages: {
+      [traversalPath]: 'untrusted-hash',
+      'linked/victim.md': 'untrusted-hash',
+    },
+    pageMetadata: {},
+  });
+
+  const first = await runGenerator(repo, configPath);
+  assert.equal(first.code, 0, `${first.stderr}\n${first.stdout}`);
+  assert.equal(server.state.repairRequests, 1);
+  assert.equal(fs.readFileSync(traversalVictim, 'utf8'), 'must survive');
+  assert.equal(
+    fs.readFileSync(path.join(linkedOutside, 'victim.md'), 'utf8'),
+    'must also survive'
+  );
+
   const landingPath = path.join(contentDir, 'guides/guides.md');
   assert.equal(fs.existsSync(landingPath), true);
   const landing = fs.readFileSync(landingPath, 'utf8');

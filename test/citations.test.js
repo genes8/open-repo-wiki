@@ -107,3 +107,21 @@ test('non-bullet links inside cite blocks cannot bypass validation', () => {
   assert.ok(result.violations.some(item => item.code === 'citation_item_format'));
   assert.doesNotMatch(result.md, /lib\/missing\.js/);
 });
+
+test('reference-style links and definitions are rejected inside cite blocks', () => {
+  const md = `<cite>
+**Referenced Files in This Document**
+- [lib/a.js](lib/a.js)
+[hidden][missing]
+- [lib/a.js](lib/a.js) [also-hidden][missing]
+[missing]: lib/missing.js
+</cite>`;
+  const result = sanitizeCitations(md, attached, lineCounts);
+
+  assert.equal(
+    result.violations.filter(item => item.code === 'citation_item_format').length,
+    3
+  );
+  assert.doesNotMatch(result.md, /hidden|missing/);
+  assert.match(result.md, /\[lib\/a\.js\]\(lib\/a\.js\)/);
+});
