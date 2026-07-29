@@ -104,7 +104,7 @@ test('commit publishes every staged target and removes transaction artifacts', t
   );
 });
 
-test('commit failure rolls every live target back', t => {
+test('missing stage is rejected before any live target moves', t => {
   const fixture = transactionFixture(t);
   const before = snapshotTree(fixture.root);
   const tx = createRunTransaction([
@@ -116,6 +116,41 @@ test('commit failure rolls every live target back', t => {
   fs.rmSync(tx.stagePath('meta'), { recursive: true, force: true });
 
   assert.throws(() => tx.commit(), /missing transaction stage/);
+  assert.deepEqual(snapshotTree(fixture.root), before);
+});
+
+test('mid-commit rename failure rolls every moved live target back', t => {
+  const fixture = transactionFixture(t);
+  const before = snapshotTree(fixture.root);
+  const tx = createRunTransaction([
+    { name: 'content', live: fixture.content },
+    { name: 'meta', live: fixture.meta },
+  ], 'run-mid-commit');
+  tx.prepare();
+  fs.writeFileSync(path.join(tx.stagePath('content'), 'page.md'), 'changed');
+  fs.writeFileSync(path.join(tx.stagePath('meta'), 'catalog.json'), '{"changed":true}\n');
+
+  const originalRename = fs.renameSync;
+  let renameCalls = 0;
+  fs.renameSync = (from, to) => {
+    renameCalls++;
+    if (renameCalls === 4) {
+      const error = new Error('forced second-target stage rename failure');
+      error.code = 'EIO';
+      throw error;
+    }
+    return originalRename(from, to);
+  };
+  try {
+    assert.throws(
+      () => tx.commit(),
+      /forced second-target stage rename failure/
+    );
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.ok(renameCalls >= 6, `expected rollback renames, saw ${renameCalls}`);
   assert.deepEqual(snapshotTree(fixture.root), before);
 });
 
