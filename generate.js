@@ -787,7 +787,7 @@ let publicationCommitted = false;
     }
   }
   atomicWrite(path.join(outDir, 'index.md'), `${idx.join('\n')}\n`);
-  console.log(`  catalog + index written -> ${path.relative(repoDir, metaDir)}`);
+  console.log(`  catalog + index staged -> ${path.relative(repoDir, liveMetaDir)}`);
   saveState();
 
   // --- Optional knowledge-card layer (opt-in via --knowledge / config.knowledge) ---
@@ -943,7 +943,7 @@ let publicationCommitted = false;
       console.log(
         `  knowledge: ${knowledgeGenerated} cards written, `
         + `${knowledgePlan.duplicates} duplicates skipped, ${removed.length} stale removed `
-        + `-> ${path.relative(repoDir, knowledgeBase)}`
+        + `-> ${path.relative(repoDir, liveKnowledgeBase)}`
       );
     } else {
       console.log(

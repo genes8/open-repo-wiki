@@ -585,6 +585,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   const planRequestsBeforeAcceptedShrink = server.state.planRequests;
   const acceptedShrink = await runGenerator(repo, configPath, ['--accept-plan-shrink']);
   assert.equal(acceptedShrink.code, 0, `${acceptedShrink.stderr}\n${acceptedShrink.stdout}`);
+  assert.doesNotMatch(acceptedShrink.stdout, /\.stage-|\.backup-/);
   assert.equal(server.state.planRequests - planRequestsBeforeAcceptedShrink, 1);
   assert.equal(fs.existsSync(path.join(contentDir, 'overview.md')), true);
   assert.equal(fs.existsSync(path.join(contentDir, 'guides/configuration.md')), false);
