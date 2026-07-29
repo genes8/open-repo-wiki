@@ -24,6 +24,7 @@ test('buildFilesBlock numbers attached lines while preserving raw source metadat
   assert.equal(result.lineCounts['a.js'], 3);
   assert.match(result.block, /L1: one\nL2: two\nL3: three/);
   assert.equal(result.rawByPath['a.js'], 'one\ntwo\nthree\n');
+  assert.equal(result.visibleByPath['a.js'], 'one\ntwo\nthree\n');
 });
 
 test('buildFilesBlock respects the shared character budget', t => {
@@ -39,6 +40,7 @@ test('buildFilesBlock respects the shared character budget', t => {
   assert.match(result.block, /a\.js \(truncated\)/);
   assert.equal(result.lineCounts['a.js'], 2);
   assert.equal(result.rawByPath['a.js'], '12345\n67890\n');
+  assert.equal(result.visibleByPath['a.js'], '12345');
 });
 
 test('buildFilesBlock does not attach empty files that cannot support a line range', t => {

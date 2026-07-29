@@ -39,6 +39,7 @@ const {
 } = require('./lib/plan-quality');
 const { createRunDiagnostics } = require('./lib/run-diagnostics');
 const { createRunTransaction } = require('./lib/run-transaction');
+const { deriveOutputLayout } = require('./lib/output-layout');
 const {
   buildKnowledgePlan,
   cleanupManagedKnowledge,
@@ -65,10 +66,9 @@ Options:
       --template <name> page template: "standard" (citations + TOC) or "minimal"
       --knowledge       also generate the structured knowledge-card layer.
                         Written to <root>/knowledge/<lang> (a sibling of the
-                        content-language dir, mirroring Qoder's repowiki layout);
-                        assumes the default <root>/<lang>/content output tree. With
-                        a custom flat --out the tree is placed two levels up from
-                        --out and may fall outside it.
+                        content-language dir, mirroring Qoder's repowiki layout).
+                        Flat custom --out paths keep support data in
+                        <out>.local-wiki instead.
       --force           regenerate everything, ignore the incremental cache
       --dry-run         print the wiki plan and exit without writing pages
       --prune           delete managed pages omitted by a successful,
@@ -317,21 +317,28 @@ let publicationCommitted = false;
   if (args.listModels) { listModels(config); process.exit(0); }
 
   const { name: modelName, profile } = pickProfile(config, args);
-  const liveOutDir = path.resolve(
+  const requestedOutDir = path.resolve(
     args.out || path.join(repoDir, '.local-wiki/en/content')
   );
+  const outWithinRequestedRepo = path.relative(requestedRepoDir, requestedOutDir);
+  const liveOutDir = args.out
+    && outWithinRequestedRepo !== '..'
+    && !outWithinRequestedRepo.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(outWithinRequestedRepo)
+    ? path.resolve(repoDir, outWithinRequestedRepo)
+    : requestedOutDir;
   const liveStatePath = path.join(liveOutDir, '.state.json');
   const maxPages = config.maxPages || 20;
   const language = config.language || 'en';
   const contextChars = profile.contextChars || 24000;
   const template = args.template || config.template || 'standard';
-  // Sibling output trees derived from the content dir: <content>/../meta and
-  // <root>/knowledge/<lang> (mirrors Qoder's repowiki layout). metaDir is kept as
-  // the direct sibling of the content dir so export.js (which resolves the catalog
-  // at <SRC>/../meta) finds it for ANY --out location, not just the default tree.
-  const localWikiRoot = path.resolve(liveOutDir, '..', '..');
-  const liveMetaDir = path.join(liveOutDir, '..', 'meta');
-  const liveKnowledgeBase = path.join(localWikiRoot, 'knowledge', language);
+  const outputLayout = deriveOutputLayout(liveOutDir, language);
+  const {
+    localWikiRoot,
+    metaDir: liveMetaDir,
+    knowledgeBase: liveKnowledgeBase,
+    runsDir,
+  } = outputLayout;
   const knowledgeRequested = !!(args.knowledge || config.knowledge);
   const deleteStale = !!(args.prune || args.acceptPlanShrink);
 
@@ -369,7 +376,7 @@ let publicationCommitted = false;
   });
 
   const runId = newRunId();
-  const diagnostics = createRunDiagnostics(path.join(localWikiRoot, 'runs'), {
+  const diagnostics = createRunDiagnostics(runsDir, {
     runId,
     repo: scan.name,
     provider: profile.provider,
@@ -407,7 +414,10 @@ let publicationCommitted = false;
       completion = await chatDetailed(
         profile,
         messages,
-        { maxTokens: profile.maxTokens }
+        {
+          maxTokens: profile.maxTokens,
+          retries: profile.retries,
+        }
       );
       rejectedPlan = completion.content;
       const parsed = extractJson(rejectedPlan);
@@ -535,6 +545,7 @@ let publicationCommitted = false;
       attached,
       lineCounts,
       rawByPath,
+      visibleByPath,
     } = buildFilesBlock(repoDir, generationPage, scan, contextChars);
     // Record the validated (real, attached) subset so the catalog cites only
     // files that actually reached the model — never the plan's raw wish-list,
@@ -603,11 +614,32 @@ let publicationCommitted = false;
             validation.violations,
             promptOptions
           );
-        const completion = await chatDetailed(
-          profile,
-          messages,
-          { maxTokens: profile.maxTokens }
-        );
+        let completion;
+        try {
+          completion = await chatDetailed(
+            profile,
+            messages,
+            {
+              maxTokens: profile.maxTokens,
+              retries: profile.retries,
+            }
+          );
+        } catch (error) {
+          diagnostics.recordPageAttempt(page.path, attempt + 1, '', {
+            provider: profile.provider,
+            model: profile.model || profile.modelPath || modelName,
+            finishReason: null,
+            usage: null,
+            citationViolations: [],
+            violations: [{
+              code: 'page_provider_error',
+              message: error.message,
+            }],
+            stats: null,
+            accepted: false,
+          });
+          throw error;
+        }
         rejected = unwrapMarkdown(completion.content);
         const citationResult = sanitizeCitations(rejected, attached, lineCounts);
         md = citationResult.md;
@@ -617,6 +649,7 @@ let publicationCommitted = false;
           citationResult,
           completion,
           rawByPath,
+          visibleByPath,
         });
         diagnostics.recordPageAttempt(page.path, attempt + 1, rejected, {
           provider: profile.provider,
@@ -857,7 +890,10 @@ let publicationCommitted = false;
         const completion = await chatDetailed(
           profile,
           knowledgeMessages(scan, groundedCard, block, { language }),
-          { maxTokens: profile.maxTokens }
+          {
+            maxTokens: profile.maxTokens,
+            retries: profile.retries,
+          }
         );
         const body = unwrapMarkdown(completion.content);
         draft = body;
@@ -967,14 +1003,19 @@ let publicationCommitted = false;
     process.exit(1);
   }
 
-  transaction.commit();
+  const publicationResult = transaction.commit();
   publicationCommitted = true;
   activeTransaction = null;
+  for (const warning of publicationResult.cleanupWarnings) {
+    console.warn(`  WARN  backup cleanup (${warning.target}): ${warning.message}`);
+  }
   diagnostics.finish('committed', {
     planFailures: 0,
     pageFailures: 0,
     knowledgeFailures: 0,
     publishedPages: publishedMetadata.length,
+    publicationPhase: 'swapped',
+    cleanupWarnings: publicationResult.cleanupWarnings,
   });
   activeDiagnostics = null;
 
@@ -985,22 +1026,26 @@ let publicationCommitted = false;
   console.log(`Tip: export to PDF with  node ${path.join(__dirname, 'export.js')} ${liveOutDir} ${path.join(repoDir, 'wiki-pdf')}`);
   process.exit(0);
 })().catch(err => {
+  let rollbackFailure = err.rollbackError || null;
   if (activeTransaction) {
     try {
       activeTransaction.abort();
     } catch (rollbackError) {
-      console.error(`Rollback failed: ${rollbackError.message}`);
+      rollbackFailure ||= rollbackError;
     }
   }
   if (activeDiagnostics && !publicationCommitted) {
     try {
       activeDiagnostics.finish('aborted', {
         fatalError: err.message,
+        publicationPhase: rollbackFailure ? 'rollback_failed' : 'aborted',
+        ...(rollbackFailure ? { rollbackError: rollbackFailure.message } : {}),
       });
     } catch (diagnosticError) {
       console.error(`Diagnostics failed: ${diagnosticError.message}`);
     }
   }
+  if (rollbackFailure) console.error(`Rollback failed: ${rollbackFailure.message}`);
   console.error(`Fatal: ${err.message}`);
   process.exit(1);
 });

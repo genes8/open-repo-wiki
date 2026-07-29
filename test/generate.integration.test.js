@@ -168,6 +168,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     failKnowledge: false,
     planSequence: null,
     finishReasonTitle: null,
+    providerErrorTitle: null,
   };
   const refusal = [
     '# Refused',
@@ -182,6 +183,9 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
       return behavior.planSequence.shift() || defaultPlan;
     },
     pageResponder: context => {
+      if (behavior.providerErrorTitle === context.title) {
+        throw new Error(`forced provider failure for ${context.title}`);
+      }
       if (behavior.alwaysFailTitle === context.title) return refusal;
       if (context.title === 'Project Overview'
         && !context.isRepair
@@ -423,6 +427,27 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   assert.ok(knowledgeAttempt.violations.some(item => item.code === 'knowledge_refusal'));
   behavior.failKnowledge = false;
 
+  const beforeProviderFailure = snapshotWiki(repo);
+  behavior.providerErrorTitle = 'Start';
+  mockConfig.models.mock.retries = 0;
+  writeJson(configPath, mockConfig);
+  const failedProvider = await runGenerator(repo, configPath, ['--force']);
+  assert.equal(failedProvider.code, 1, `${failedProvider.stderr}\n${failedProvider.stdout}`);
+  assert.deepEqual(snapshotWiki(repo), beforeProviderFailure);
+  const providerFailureRun = latestRunDir(repo);
+  const providerAttempt = JSON.parse(fs.readFileSync(
+    path.join(providerFailureRun, 'pages/guides/start/attempt-1.json'),
+    'utf8'
+  ));
+  assert.equal(providerAttempt.finishReason, null);
+  assert.equal(providerAttempt.accepted, false);
+  assert.ok(providerAttempt.violations.some(
+    item => item.code === 'page_provider_error'
+  ));
+  behavior.providerErrorTitle = null;
+  delete mockConfig.models.mock.retries;
+  writeJson(configPath, mockConfig);
+
   const startPlan = plan.pages.find(page => page.path === 'guides/start.md');
   const startCallsBeforeIdentityChange = server.state.byTitle.Start;
   startPlan.files = ['README.md', 'lib/b.js'];
@@ -596,4 +621,33 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   assert.equal(finalState.generationSchemaVersion, 3);
   assert.equal(finalState.lastSuccessfulPlan.length, 1);
   assert.ok(finalState.lastRunId);
+  const committedSummary = JSON.parse(fs.readFileSync(
+    path.join(latestRunDir(repo), 'run.json'),
+    'utf8'
+  ));
+  assert.equal(committedSummary.status, 'committed');
+  assert.equal(committedSummary.publicationPhase, 'swapped');
+  assert.deepEqual(committedSummary.cleanupWarnings, []);
+
+  behavior.planSequence = null;
+  const flatOut = path.join(repo, 'flat-wiki');
+  const flatRun = await runGenerator(repo, configPath, ['--out', flatOut]);
+  assert.equal(flatRun.code, 0, `${flatRun.stderr}\n${flatRun.stdout}`);
+  assert.equal(fs.existsSync(path.join(flatOut, 'overview.md')), true);
+  assert.equal(fs.existsSync(path.join(repo, 'meta/catalog.json')), true);
+  assert.equal(
+    fs.existsSync(path.join(`${flatOut}.local-wiki`, 'knowledge/en/_manifest.json')),
+    true
+  );
+  const flatRuns = path.join(`${flatOut}.local-wiki`, 'runs');
+  assert.ok(fs.readdirSync(flatRuns).length > 0);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(
+      flatRuns,
+      fs.readdirSync(flatRuns).sort().at(-1),
+      'run.json'
+    ), 'utf8')).status,
+    'committed'
+  );
+  assert.deepEqual(transactionArtifacts(repo), []);
 });

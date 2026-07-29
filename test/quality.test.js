@@ -231,3 +231,30 @@ test('does not combine separate source files to ground one shell command', () =>
   });
   assert.ok(codes(result).includes('ungrounded_command'));
 });
+
+test('rejects ungrounded commands in GFM tilde shell fences', () => {
+  for (const language of ['bash', 'sh', 'console']) {
+    const commandPage = validPage().replace(
+      /grounded\.$/,
+      `grounded.\n\n~~~${language}\nnode unsafe.js\n~~~\n\nFinal sentence.`
+    );
+    const result = validatePage(commandPage, context);
+    assert.ok(
+      codes(result).includes('ungrounded_command'),
+      `expected ${language} tilde fence to be validated`
+    );
+  }
+});
+
+test('rejects a command present only beyond the visible source cutoff', () => {
+  const commandPage = validPage().replace(
+    /grounded\.$/,
+    'grounded.\n\n```bash\nnode hidden.js\n```\n\nFinal sentence.'
+  );
+  const result = validatePage(commandPage, {
+    ...context,
+    rawByPath: { 'lib/a.js': 'visible prefix\nnode hidden.js\n' },
+    visibleByPath: { 'lib/a.js': 'visible prefix\n' },
+  });
+  assert.ok(codes(result).includes('ungrounded_command'));
+});

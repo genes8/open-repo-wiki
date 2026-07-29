@@ -154,6 +154,65 @@ test('mid-commit rename failure rolls every moved live target back', t => {
   assert.deepEqual(snapshotTree(fixture.root), before);
 });
 
+test('surfaces a rollback failure on the original commit error', t => {
+  const fixture = transactionFixture(t);
+  const tx = createRunTransaction([
+    { name: 'content', live: fixture.content },
+    { name: 'meta', live: fixture.meta },
+  ], 'run-rollback-error');
+  tx.prepare();
+
+  const originalRename = fs.renameSync;
+  let renameCalls = 0;
+  fs.renameSync = (from, to) => {
+    renameCalls++;
+    if (renameCalls === 4) throw new Error('forced commit rename failure');
+    if (renameCalls === 5) throw new Error('forced rollback restore failure');
+    return originalRename(from, to);
+  };
+  let thrown;
+  try {
+    tx.commit();
+  } catch (error) {
+    thrown = error;
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.match(thrown.message, /forced commit rename failure/);
+  assert.match(thrown.rollbackError.message, /forced rollback restore failure/);
+});
+
+test('returns backup cleanup warnings after a successful commit', t => {
+  const fixture = transactionFixture(t);
+  const tx = createRunTransaction([
+    { name: 'content', live: fixture.content },
+    { name: 'meta', live: fixture.meta },
+  ], 'run-cleanup-warning');
+  tx.prepare();
+  fs.writeFileSync(path.join(tx.stagePath('content'), 'page.md'), 'next page');
+
+  const originalRm = fs.rmSync;
+  fs.rmSync = (target, options) => {
+    if (String(target).includes('.content.backup-run-cleanup-warning')) {
+      throw new Error('forced backup cleanup failure');
+    }
+    return originalRm(target, options);
+  };
+  let result;
+  try {
+    result = tx.commit();
+  } finally {
+    fs.rmSync = originalRm;
+  }
+
+  assert.equal(fs.readFileSync(path.join(fixture.content, 'page.md'), 'utf8'), 'next page');
+  assert.deepEqual(result.cleanupWarnings, [{
+    target: 'content',
+    message: 'forced backup cleanup failure',
+  }]);
+});
+
 test('rejects overlapping and symlinked live targets', t => {
   const fixture = transactionFixture(t);
   const child = path.join(fixture.content, 'nested');
