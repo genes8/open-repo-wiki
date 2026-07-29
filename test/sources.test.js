@@ -40,3 +40,22 @@ test('buildFilesBlock respects the shared character budget', t => {
   assert.equal(result.lineCounts['a.js'], 2);
   assert.equal(result.rawByPath['a.js'], '12345\n67890\n');
 });
+
+test('buildFilesBlock does not attach empty files that cannot support a line range', t => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-sources-'));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(repo, 'empty.js'), '');
+  fs.writeFileSync(path.join(repo, 'real.js'), 'content\n');
+  const scan = { fileSet: new Set(['empty.js', 'real.js']) };
+
+  const result = buildFilesBlock(
+    repo,
+    { files: ['empty.js', 'real.js'] },
+    scan,
+    1000
+  );
+
+  assert.deepEqual(result.attached, ['real.js']);
+  assert.equal(Object.hasOwn(result.lineCounts, 'empty.js'), false);
+  assert.equal(result.lineCounts['real.js'], 1);
+});

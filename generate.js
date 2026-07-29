@@ -19,9 +19,29 @@ const path = require('path');
 const crypto = require('crypto');
 const { scanRepo } = require('./lib/scan');
 const { chat, resolveApiKey } = require('./lib/providers');
-const { planMessages, pageMessages, knowledgeMessages, KNOWLEDGE_CARDS, extractJson } = require('./lib/prompts');
+const {
+  planMessages,
+  pageMessages,
+  repairPageMessages,
+  knowledgeMessages,
+  KNOWLEDGE_CARDS,
+  extractJson,
+} = require('./lib/prompts');
 const { moduleMap, titleCase } = require('./lib/modules');
 const { sanitizeCitations } = require('./lib/citations');
+const { normalizePlan, dirOf } = require('./lib/plan');
+const { buildFilesBlock } = require('./lib/sources');
+const { classifyPage, validatePage } = require('./lib/quality');
+const {
+  buildKnowledgePlan,
+  cleanupManagedKnowledge,
+  loadManifest,
+  renderFrontmatter,
+  validateKnowledgeContent,
+  writeManifest,
+} = require('./lib/knowledge');
+
+const GENERATION_SCHEMA_VERSION = 2;
 
 const HELP = `Local Repo Wiki generator
 
@@ -112,15 +132,6 @@ function listModels(config) {
   console.log('\n(* = default; select with --model <name> or REPO_WIKI_MODEL)');
 }
 
-function sanitizePagePath(p) {
-  const clean = String(p).replace(/\\/g, '/').replace(/^\/+/, '')
-    .split('/').filter(seg => seg && seg !== '.' && seg !== '..')
-    .map(seg => seg.replace(/[^\w.\- ]/g, '_'))
-    .join('/');
-  if (!clean) return null;
-  return clean.toLowerCase().endsWith('.md') ? clean : clean + '.md';
-}
-
 function sha1(s) { return crypto.createHash('sha1').update(s).digest('hex'); }
 
 // Strip a single wrapping ```markdown fence some models add around the page
@@ -130,24 +141,34 @@ function unwrapMarkdown(text) {
   return m ? m[1].trim() : t;
 }
 
-function buildFilesBlock(repoDir, page, scan, budget) {
-  const PER_FILE_CAP = 24000;
-  const parts = [];
-  let used = 0;
-  const attached = [];
-  for (const rel of page.files || []) {
-    if (!scan.fileSet.has(rel)) continue; // model hallucinated a path — drop it
-    if (used >= budget) break;
-    let content;
-    try { content = fs.readFileSync(path.join(repoDir, rel), 'utf8'); } catch { continue; }
-    let truncated = false;
-    const room = Math.min(PER_FILE_CAP, budget - used);
-    if (content.length > room) { content = content.slice(0, room); truncated = true; }
-    used += content.length;
-    attached.push(rel);
-    parts.push(`--- ${rel}${truncated ? ' (truncated)' : ''} ---\n${content}`);
+function atomicWrite(file, content) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(temporary, content);
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }
-  return { block: parts.join('\n\n'), attached };
+}
+
+function collectKnowledgeEvidence(repoDir, scan) {
+  const MAX_TOTAL = 4 * 1024 * 1024;
+  const MAX_PER_FILE = 64 * 1024;
+  const evidence = {};
+  let used = 0;
+  for (const file of scan.files) {
+    if (used >= MAX_TOTAL) break;
+    const room = Math.min(MAX_PER_FILE, MAX_TOTAL - used);
+    try {
+      const content = fs.readFileSync(path.join(repoDir, file.rel), 'utf8').slice(0, room);
+      evidence[file.rel] = content;
+      used += content.length;
+    } catch {
+      // A file may disappear after the scan; omit it from topic evidence.
+    }
+  }
+  return evidence;
 }
 
 (async () => {
@@ -204,15 +225,14 @@ function buildFilesBlock(repoDir, page, scan, budget) {
     console.error(`Plan failed: ${err.message} (raw output saved to ${dump})`);
     process.exit(1);
   }
-  const seenPaths = new Set();
-  const pages = (Array.isArray(plan.pages) ? plan.pages : [])
-    .map(p => ({ ...p, path: sanitizePagePath(p.path) }))
-    .filter(p => p.path && p.title && !seenPaths.has(p.path) && seenPaths.add(p.path))
-    .slice(0, maxPages);
-  if (pages.length === 0) {
-    console.error('Model returned an empty/unusable plan.');
+  let normalized;
+  try {
+    normalized = normalizePlan(plan.pages, scan, { maxPages });
+  } catch (err) {
+    console.error(`Plan failed validation: ${err.message}`);
     process.exit(1);
   }
+  const pages = normalized.pages;
   console.log(`  ${pages.length} pages planned:`);
   for (const p of pages) console.log(`    - ${p.path}  (${p.title})`);
 
@@ -239,47 +259,32 @@ function buildFilesBlock(repoDir, page, scan, budget) {
   let ok = 0, skipped = 0, failed = 0;
   const currentPaths = new Set(pages.map(p => p.path));
 
-  // Landing pages (a "dir/dir.md" or "dir/index.md" heading a multi-page
-  // subdirectory) are generated AFTER their children so the summary can link
-  // the real child pages. Enrich their focus with the concrete child list first.
-  const dirOf = (p) => { const i = p.lastIndexOf('/'); return i === -1 ? '' : p.slice(0, i); };
-  const baseNoExt = (p) => p.slice(p.lastIndexOf('/') + 1).replace(/\.md$/, '');
-  const pagesByDir = new Map();
-  for (const p of pages) {
-    const d = dirOf(p.path);
-    if (!pagesByDir.has(d)) pagesByDir.set(d, []);
-    pagesByDir.get(d).push(p);
-  }
-  for (const p of pages) {
-    const d = dirOf(p.path);
-    if (!d) continue;
-    const dirLast = d.slice(d.lastIndexOf('/') + 1);
-    const bn = baseNoExt(p.path);
-    if (bn !== dirLast && bn !== 'index') continue;
-    const children = (pagesByDir.get(d) || []).filter(s => s.path !== p.path);
-    if (children.length === 0) continue;
-    p._landing = true;
-    p._children = children;
-    p._desc0 = p.description;
-    const links = children
-      .map(c => `- [${c.title}](${c.path.slice(c.path.lastIndexOf('/') + 1)})`)
-      .join('\n');
-    p.description = `${p.description || p.title}\n\nThis is the landing page for the "${d}" section. Introduce the section briefly, then link to each child page:\n${links}`;
-  }
+  const pagesByDir = normalized.groups;
   const mainPages = pages.filter(p => !p._landing);
   const landingPages = pages.filter(p => p._landing);
 
   const processPage = async (page) => {
     if (args.pages && !page.path.includes(args.pages)) { skipped++; return; }
     const outFile = path.join(outDir, page.path);
-    const { block, attached } = buildFilesBlock(repoDir, page, scan, contextChars);
+    const {
+      block,
+      attached,
+      lineCounts,
+      rawByPath,
+    } = buildFilesBlock(repoDir, page, scan, contextChars);
     // Record the validated (real, attached) subset so the catalog cites only
     // files that actually reached the model — never the plan's raw wish-list,
     // which may still contain hallucinated paths.
     page._attached = attached;
     const hash = sha1([
-      modelName, language, template, page.title, page.description || '',
-      ...attached.map(rel => { try { return sha1(fs.readFileSync(path.join(repoDir, rel))); } catch { return rel; } }),
+      GENERATION_SCHEMA_VERSION,
+      modelName,
+      language,
+      template,
+      page.title,
+      page.description || '',
+      JSON.stringify((page._children || []).map(child => [child.path, child.title])),
+      ...attached.map(rel => sha1(rawByPath[rel])),
     ].join('|'));
 
     if (!args.force && state.pages[page.path] === hash && fs.existsSync(outFile)) {
@@ -289,18 +294,50 @@ function buildFilesBlock(repoDir, page, scan, budget) {
     }
     try {
       console.log(`  GEN   ${page.path} ...`);
-      const raw = await chat(profile, pageMessages(scan, page, block, { language, attached, template }), { maxTokens: profile.maxTokens });
-      let md = unwrapMarkdown(raw);
-      if (md.length < 50) throw new Error('suspiciously short page output');
-      // Output-side guard: strip any structured citation the model may have
-      // emitted to a path we never attached (input filtering can't catch this).
-      if (attached.length) {
-        const san = sanitizeCitations(md, attached);
-        md = san.md;
-        if (san.dropped) console.log(`  note  ${page.path}: dropped ${san.dropped} ungrounded citation(s)`);
+      const promptOptions = {
+        language,
+        attached,
+        lineCounts,
+        template,
+        profile: classifyPage(page),
+      };
+      let rejected = '';
+      let validation;
+      let md = '';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const messages = attempt === 0
+          ? pageMessages(scan, page, block, promptOptions)
+          : repairPageMessages(
+            scan,
+            page,
+            block,
+            rejected,
+            validation.violations,
+            promptOptions
+          );
+        const raw = await chat(
+          profile,
+          messages,
+          { maxTokens: profile.maxTokens }
+        );
+        rejected = unwrapMarkdown(raw);
+        const citationResult = sanitizeCitations(rejected, attached, lineCounts);
+        md = citationResult.md;
+        validation = validatePage(md, { page, attached, citationResult });
+        if (citationResult.dropped) {
+          console.log(
+            `  note  ${page.path}: dropped ${citationResult.dropped} invalid citation item(s)`
+          );
+        }
+        if (validation.ok) break;
+        const codes = [...new Set(validation.violations.map(item => item.code))].join(',');
+        if (attempt < 2) {
+          console.log(`  REPAIR ${page.path} attempt ${attempt + 1}/2 (${codes})`);
+        } else {
+          throw new Error(`quality validation failed after 3 attempts (${codes})`);
+        }
       }
-      fs.mkdirSync(path.dirname(outFile), { recursive: true });
-      fs.writeFileSync(outFile, md + '\n');
+      atomicWrite(outFile, `${md.trim()}\n`);
       state.pages[page.path] = hash;
       saveState();
       ok++;
@@ -344,20 +381,17 @@ function buildFilesBlock(repoDir, page, scan, budget) {
   pruneEmpty(outDir);
 
   state.model = modelName;
+  state.generationSchemaVersion = GENERATION_SCHEMA_VERSION;
   state.generatedAt = new Date().toISOString();
   saveState();
 
   // --- Catalog + navigable index (meta layer) ---
-  const landingByDir = new Map();
-  for (const p of pages) if (p._landing) landingByDir.set(dirOf(p.path), p.path);
   const catalog = {
     repo: scan.name,
     model: modelName,
     language,
     generatedAt: state.generatedAt,
     pages: pages.map(p => {
-      const d = dirOf(p.path);
-      const parent = (!p._landing && landingByDir.has(d)) ? landingByDir.get(d) : null;
       return {
         path: p.path,
         title: p.title,
@@ -365,13 +399,16 @@ function buildFilesBlock(repoDir, page, scan, budget) {
         // Real files that reached the model, not the plan's raw list (which may
         // still name paths that don't exist in the repo).
         dependent_files: p._attached || (p.files || []).filter(f => scan.fileSet.has(f)),
-        parent,
+        parent: normalized.parentByPath.get(p.path) || null,
         isLanding: !!p._landing,
       };
     }),
   };
   fs.mkdirSync(metaDir, { recursive: true });
-  fs.writeFileSync(path.join(metaDir, 'catalog.json'), JSON.stringify(catalog, null, 2));
+  atomicWrite(
+    path.join(metaDir, 'catalog.json'),
+    `${JSON.stringify(catalog, null, 2)}\n`
+  );
 
   // Human-navigable index that works in any markdown viewer.
   const idx = [`# ${scan.name} — Wiki`, ''];
@@ -388,15 +425,21 @@ function buildFilesBlock(repoDir, page, scan, budget) {
       for (const c of children) idx.push(`  - [${c.title}](${c.path})`);
     }
   }
-  fs.writeFileSync(path.join(outDir, 'index.md'), idx.join('\n') + '\n');
+  atomicWrite(path.join(outDir, 'index.md'), `${idx.join('\n')}\n`);
   console.log(`  catalog + index written -> ${path.relative(repoDir, metaDir)}`);
 
   // --- Optional knowledge-card layer (opt-in via --knowledge / config.knowledge) ---
+  let knowledgeFailed = 0;
   if (args.knowledge || config.knowledge) {
     console.log('\nGenerating knowledge cards...');
     const modules = moduleMap(scan);
-    const cardNames = Object.keys(KNOWLEDGE_CARDS);
-    fs.mkdirSync(knowledgeBase, { recursive: true });
+    const knowledgePlan = buildKnowledgePlan(
+      scan,
+      modules,
+      KNOWLEDGE_CARDS,
+      collectKnowledgeEvidence(repoDir, scan)
+    );
+    const managedContent = new Map();
     const yaml = [
       'schema_version: 1',
       `locale: ${language}`,
@@ -405,47 +448,90 @@ function buildFilesBlock(repoDir, page, scan, budget) {
       'modules:',
     ];
     for (const m of modules) {
-      yaml.push(`    "${m.key}":`);
-      yaml.push(`        dir_name: ${m.dir}`);
-      yaml.push(`        title: ${m.title}`);
+      yaml.push(`    ${JSON.stringify(m.key)}:`);
+      yaml.push(`        dir_name: ${JSON.stringify(m.dir)}`);
+      yaml.push(`        title: ${JSON.stringify(m.title)}`);
       yaml.push('        scope:');
-      for (const f of m.scope) yaml.push(`            - ${f}`);
+      for (const f of m.scope) yaml.push(`            - ${JSON.stringify(f)}`);
       yaml.push('        children:');
-      for (const c of m.children) yaml.push(`            - ${c}`);
+      for (const c of m.children) yaml.push(`            - ${JSON.stringify(c)}`);
     }
-    fs.writeFileSync(path.join(knowledgeBase, '_index.yaml'), yaml.join('\n') + '\n');
+    managedContent.set('_index.yaml', `${yaml.join('\n')}\n`);
 
-    let kok = 0, kfail = 0;
     for (const m of modules) {
-      const dir = path.join(knowledgeBase, m.dir);
-      fs.mkdirSync(dir, { recursive: true });
       const mod = [
         'schema_version: 1',
-        `module_path: "${m.path}"`,
-        `title: ${m.title}`,
+        `module_path: ${JSON.stringify(m.path)}`,
+        `title: ${JSON.stringify(m.title)}`,
         'scope:',
-        ...m.scope.map(f => `    - ${f}`),
+        ...m.scope.map(f => `    - ${JSON.stringify(f)}`),
       ];
-      fs.writeFileSync(path.join(dir, '_module.yaml'), mod.join('\n') + '\n');
-      const { block, attached } = buildFilesBlock(repoDir, { files: m.scope }, scan, contextChars);
-      for (const card of cardNames) {
-        try {
-          const raw = await chat(profile, knowledgeMessages(scan, m, block, { language, card }), { maxTokens: profile.maxTokens });
-          fs.writeFileSync(path.join(dir, `${card}.md`), unwrapMarkdown(raw) + '\n');
-          kok++;
-        } catch (err) {
-          kfail++;
-          console.log(`  FAIL  ${m.dir}/${card}: ${err.message.split('\n')[0]}`);
-        }
-      }
-      console.log(`  card set: ${m.dir} (${attached.length} source files)`);
+      managedContent.set(`${m.dir}/_module.yaml`, `${mod.join('\n')}\n`);
     }
-    console.log(`  knowledge: ${kok} cards written, ${kfail} failed -> ${path.relative(repoDir, knowledgeBase)}`);
+
+    let knowledgeGenerated = 0;
+    for (const card of knowledgePlan.cards) {
+      try {
+        const { block, attached } = buildFilesBlock(
+          repoDir,
+          { files: card.source_files },
+          scan,
+          contextChars
+        );
+        const groundedCard = { ...card, source_files: attached };
+        const raw = await chat(
+          profile,
+          knowledgeMessages(scan, groundedCard, block, { language }),
+          { maxTokens: profile.maxTokens }
+        );
+        const body = unwrapMarkdown(raw);
+        const validation = validateKnowledgeContent(body);
+        if (!validation.ok) {
+          throw new Error(
+            validation.violations.map(item => item.code).join(',')
+          );
+        }
+        managedContent.set(
+          card.relativePath,
+          `${renderFrontmatter(groundedCard)}\n${body.trim()}\n`
+        );
+        knowledgeGenerated++;
+      } catch (err) {
+        knowledgeFailed++;
+        console.log(`  FAIL  ${card.relativePath}: ${err.message.split('\n')[0]}`);
+      }
+    }
+
+    if (knowledgeFailed === 0) {
+      const previousManifest = loadManifest(knowledgeBase);
+      for (const [relative, content] of managedContent) {
+        atomicWrite(path.join(knowledgeBase, relative), content);
+      }
+      const nextFiles = [...managedContent.keys()];
+      const removed = cleanupManagedKnowledge(
+        knowledgeBase,
+        previousManifest.files,
+        nextFiles
+      );
+      writeManifest(knowledgeBase, nextFiles);
+      console.log(
+        `  knowledge: ${knowledgeGenerated} cards written, `
+        + `${knowledgePlan.duplicates} duplicates skipped, ${removed.length} stale removed `
+        + `-> ${path.relative(repoDir, knowledgeBase)}`
+      );
+    } else {
+      console.log(
+        `  knowledge: ${knowledgeFailed} failed; previous managed output preserved`
+      );
+    }
   }
 
-  console.log(`\nDone: ${ok} generated, ${skipped} skipped, ${failed} failed -> ${outDir}`);
+  console.log(
+    `\nDone: ${ok} generated, ${skipped} skipped, `
+    + `${failed} page failures, ${knowledgeFailed} knowledge failures -> ${outDir}`
+  );
   console.log(`Tip: export to PDF with  node ${path.join(__dirname, 'export.js')} ${outDir} ${path.join(repoDir, 'wiki-pdf')}`);
-  process.exit(failed > 0 ? 1 : 0);
+  process.exit(failed + knowledgeFailed > 0 ? 1 : 0);
 })().catch(err => {
   console.error(`Fatal: ${err.message}`);
   process.exit(1);

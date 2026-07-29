@@ -12,6 +12,7 @@ const {
   cleanupManagedKnowledge,
   loadManifest,
   renderFrontmatter,
+  validateKnowledgeContent,
   writeManifest,
 } = require('../lib/knowledge');
 
@@ -88,6 +89,25 @@ test('renderFrontmatter includes grounded card metadata', () => {
   assert.match(frontmatter, /scope:\n  - "lib\/\*\*"/);
   assert.match(frontmatter, /source_files:\n  - "lib\/a\.js"/);
   assert.match(frontmatter, /---\n$/);
+});
+
+test('knowledge content rejects refusal and short stub artifacts', () => {
+  assert.equal(
+    validateKnowledgeContent(
+      'This grounded card explains configuration resolution using `config.json` and runtime environment values.'
+    ).ok,
+    true
+  );
+  assert.deepEqual(
+    validateKnowledgeContent('I apologize, but I cannot access the files.').violations
+      .map(item => item.code),
+    ['knowledge_refusal']
+  );
+  assert.deepEqual(
+    validateKnowledgeContent('_Not applicable for this module._').violations
+      .map(item => item.code),
+    ['knowledge_too_short']
+  );
 });
 
 test('manifest cleanup removes only stale managed files', t => {
