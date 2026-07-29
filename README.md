@@ -65,6 +65,9 @@ node generate.js [repoDir] [options]
   -c, --config <file>   config (default: <repo>/repo-wiki.config.json, then ./config.json)
       --pages <substr>  only (re)generate pages whose path contains substring
       --concurrency <n> pages generated in parallel (default: profile `concurrency`, else 1)
+      --template <name> `standard` (citations + optional TOC) or `minimal`
+                        (grounding citations without TOC guidance)
+      --knowledge       also generate semantic module and cross-cutting knowledge cards
       --force           ignore the incremental cache
       --dry-run         show the wiki plan, write nothing
       --list-models     show all profiles and whether API keys are set
@@ -96,6 +99,8 @@ in a target repository to override per-project. Profile fields:
   "default": "ollama-qwen",           // profile used when --model is omitted
   "language": "en",                   // wiki language
   "maxPages": 20,
+  "template": "standard",             // standard or minimal
+  "knowledge": false,                 // opt in to the knowledge-card layer
   "models": {
     "my-model": {
       "provider": "openai | ollama | llamacpp",
@@ -164,25 +169,97 @@ Notes:
 ```mermaid
 graph LR
   A[scan repo<br/>tree, key files, .gitignore] --> B[stage 1: model plans<br/>wiki structure as JSON]
-  B --> C[stage 2: model writes each page<br/>with relevant source attached]
-  C --> D[.local-wiki/en/content/*.md]
-  D --> E[export.js -> PDF]
+  B --> C[normalize plan<br/>hard cap + landings]
+  C --> D[model writes from<br/>numbered source lines]
+  D --> E{quality + citation<br/>validation}
+  E -->|invalid| F[targeted repair<br/>up to two times]
+  F --> E
+  E -->|valid| G[atomic publish]
+  G --> H[.local-wiki/en/content/*.md]
+  H --> I[export.js -> PDF]
 ```
 
-- **Incremental:** a hash of (model, title, description, source file contents)
-  is kept in `.state.json`; unchanged pages are skipped on re-runs, pages
-  dropped from the plan are removed, failed pages keep their previous version.
-  State is persisted after every page, so an interrupted run resumes where it
-  stopped.
+- **Deterministic plan:** planner paths and source lists are validated against the
+  scan. Every final directory with two or more content pages gets exactly one
+  landing page, even when the model omitted it. Landings are generated after
+  their children, and the final page count never exceeds `maxPages`.
+- **Incremental:** `.state.json` stores a generation-schema version and a hash of
+  the model/language/template/page metadata plus the raw contents of source files
+  actually attached to that page. Unchanged pages are skipped, dropped pages are
+  removed, and state changes only after a validated page is atomically published.
+  A failed regeneration keeps its previous page and previous hash.
 - **Parallel:** set `concurrency` in a profile (or pass `--concurrency N`) to
   generate pages through a worker pool — most useful for online APIs.
 - **Grounded:** file paths the model hallucinates in the plan are dropped;
-  page prompts contain the actual source code (budgeted by `contextChars`).
+  page prompts contain numbered source lines (budgeted by `contextChars`).
+- **Quality-gated:** pages must match their planned H1, bounded depth profile,
+  citation requirements, Markdown-fence balance, and landing-child links.
+  Refusals, apology/tool-failure text, empty inline code, shallow output, padding,
+  and excessive diagrams are rejected. The generator makes up to two targeted
+  repair attempts, then reports a non-zero exit without publishing bad output.
 - **Reasoning-model safe:** `think: false` is sent to Ollama thinking models
-  (with fallback), `<think>...</think>` blocks are stripped from answers, and
-  `reasoning_content` is used when a server leaves `content` empty.
+  (with fallback), complete reasoning blocks are stripped only when they occur at
+  the beginning of an answer, and literal inline `<think>...</think>` examples
+  remain intact. `reasoning_content` is used when a server leaves `content` empty.
 
-## Smoke test (no model needed)
+### Page depth profiles
+
+Profiles are selected from the normalized page metadata. They bound depth
+without forcing a universal section skeleton or a minimum diagram count.
+
+| Profile | H2 sections | Words | Maximum Mermaid diagrams |
+|---|---:|---:|---:|
+| Landing | 2–4 | 120–700 | 1 |
+| Guide/default | 3–6 | 200–1,100 | 1 |
+| Overview | 4–7 | 280–1,400 | 2 |
+| Architecture/reference | 4–8 | 300–1,600 | 3 |
+
+Unsupported sections and diagrams should be omitted rather than padded.
+
+### Source citations
+
+The top `<cite>` block is a whole-file inventory:
+
+```markdown
+- [lib/providers.js](lib/providers.js)
+```
+
+`**Section sources**` and `**Diagram sources**` use repository-relative,
+line-anchored links:
+
+```markdown
+- [lib/providers.js:L11-L23](lib/providers.js#L11-L23)
+```
+
+The generator verifies that the file was attached and that
+`1 <= start <= end <= actualLineCount`. Malformed, reversed, unattached, and
+out-of-bounds ranges are removed and sent back to the repair prompt; ranges are
+never silently clamped or invented.
+
+### Knowledge cards
+
+Pass `--knowledge` (or set `"knowledge": true`) to write
+`.local-wiki/knowledge/<language>/`. The layer keeps the five module-card kinds,
+uses semantic names for common modules such as `lib` → `Core Libraries`, and
+adds one evidence-backed card for each detected cross-cutting topic:
+configuration, error handling, logging, and dependency management.
+
+Every card has YAML frontmatter containing `kind`, `category`, `name`, `scope`,
+and `source_files`. Stable identities remove duplicates before model calls.
+`_manifest.json` records generator-managed files; stale managed files are
+removed only after a fully successful knowledge pass, while unlisted user files
+are preserved.
+
+## Test and smoke test (no model needed)
+
+The authoritative suite uses Node's built-in test runner and an ephemeral local
+mock provider:
+
+```bash
+npm test
+```
+
+For a manual smoke run:
 
 ```bash
 node test/mock-llm.js &            # fake OpenAI API on :8688
