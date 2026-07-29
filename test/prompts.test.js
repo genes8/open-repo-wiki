@@ -2,12 +2,17 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pageMessages, repairPageMessages } = require('../lib/prompts');
+const {
+  pageMessages,
+  repairPageMessages,
+  repairPlanMessages,
+} = require('../lib/prompts');
 const { PAGE_PROFILES } = require('../lib/quality');
 
 const scan = {
   name: 'demo',
   tree: 'lib/\n  a.js',
+  keyFiles: {},
 };
 const page = {
   path: 'architecture/data-flow.md',
@@ -81,4 +86,35 @@ test('landing prompt includes exact final child links', () => {
 
   assert.match(prompt, /- \[Start\]\(start\.md\)/);
   assert.match(prompt, /- \[Configuration\]\(config\.md\)/);
+});
+
+test('repairPlanMessages requests a complete replacement for exact plan violations', () => {
+  const previous = [
+    { path: 'overview.md', title: 'Project Overview' },
+    { path: 'architecture/providers.md', title: 'AI Providers' },
+  ];
+  const violations = [
+    {
+      code: 'plan_page_regression',
+      message: 'plan has 2 pages; previous 8, minimum 6',
+    },
+    {
+      code: 'plan_singleton_directory',
+      message: 'directory guides contains one non-landing page',
+    },
+  ];
+  const messages = repairPlanMessages(
+    scan,
+    previous,
+    '{"pages":[{"path":"overview.md"}]}',
+    violations,
+    { maxPages: 20 }
+  );
+  const prompt = messages.map(message => message.content).join('\n');
+
+  assert.match(prompt, /plan_page_regression: plan has 2 pages/);
+  assert.match(prompt, /plan_singleton_directory: directory guides/);
+  assert.match(prompt, /architecture\/providers\.md.*AI Providers/s);
+  assert.match(prompt, /\{"pages":\[\{"path":"overview\.md"\}\]\}/);
+  assert.match(prompt, /complete replacement JSON plan/i);
 });
