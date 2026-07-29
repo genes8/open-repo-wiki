@@ -41,6 +41,7 @@ test('pageMessages includes bounded depth and grounded range citation rules', ()
   assert.match(prompt, /Diagram sources/);
   assert.match(prompt, /omit unsupported sections and diagrams/i);
   assert.match(prompt, /never guess or exceed numbered source lines/i);
+  assert.match(prompt, /Shell commands may appear only when the exact command text is visible/i);
 });
 
 test('repairPageMessages requests a complete replacement with stable violations', () => {

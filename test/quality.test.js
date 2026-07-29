@@ -27,7 +27,7 @@ function validPage({
     out.push(`## Section ${index + 1}`);
     const child = children[index];
     if (child) out.push(`[${child.title}](${child.path.split('/').at(-1)})`);
-    out.push(Array.from({ length: wordsPerSection }, () => 'grounded').join(' '));
+    out.push(`${Array.from({ length: wordsPerSection }, () => 'grounded').join(' ')}.`);
     if (includeRange && index === 0) {
       out.push('**Section sources**', '- [lib/a.js:L1-L5](lib/a.js#L1-L5)');
     }
@@ -47,6 +47,8 @@ const context = {
   page,
   attached: ['lib/a.js'],
   citationResult: { validRanges: 1, violations: [] },
+  completion: { finishReason: 'stop' },
+  rawByPath: { 'lib/a.js': 'source evidence without shell commands' },
 };
 
 test('classifyPage selects deterministic page profiles', () => {
@@ -153,4 +155,42 @@ test('propagates citation sanitizer violations', () => {
     },
   });
   assert.ok(codes(result).includes('citation_range_bounds'));
+});
+
+test('rejects token-limited completions', () => {
+  const result = validatePage(validPage(), {
+    ...context,
+    completion: { finishReason: 'length' },
+  });
+  assert.ok(codes(result).includes('completion_truncated'));
+});
+
+test('rejects a final section ending mid-sentence', () => {
+  const broken = validPage().replace(/\.$/, '');
+  const result = validatePage(broken, context);
+  assert.ok(codes(result).includes('incomplete_ending'));
+});
+
+test('rejects shell commands absent from attached sources', () => {
+  const broken = validPage().replace(
+    /grounded\.$/,
+    'grounded.\n\n```bash\nnode test/*.test.js\n```\n\nFinal sentence.'
+  );
+  const result = validatePage(broken, {
+    ...context,
+    rawByPath: { 'lib/a.js': '"test":"node --test test/*.test.js"' },
+  });
+  assert.ok(codes(result).includes('ungrounded_command'));
+});
+
+test('accepts exact source-backed shell commands', () => {
+  const grounded = validPage().replace(
+    /grounded\.$/,
+    'grounded.\n\n```bash\nnode --test test/*.test.js\n```\n\nFinal sentence.'
+  );
+  const result = validatePage(grounded, {
+    ...context,
+    rawByPath: { 'lib/a.js': '"test":"node --test test/*.test.js"' },
+  });
+  assert.equal(codes(result).includes('ungrounded_command'), false);
 });
