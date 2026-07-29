@@ -169,6 +169,27 @@ test('rejects a final section ending mid-sentence', () => {
   const broken = validPage().replace(/\.$/, '');
   const result = validatePage(broken, context);
   assert.ok(codes(result).includes('incomplete_ending'));
+  assert.equal(codes(result).includes('incomplete_final_section'), false);
+});
+
+test('rejects a final section without enough substantive content', () => {
+  const broken = validPage().replace(
+    /## Section 4[\s\S]*$/,
+    '## Section 4\n\nShort ending.'
+  );
+  const result = validatePage(broken, context);
+  assert.ok(codes(result).includes('incomplete_final_section'));
+  assert.equal(codes(result).includes('incomplete_ending'), false);
+});
+
+test('accepts a short final section with two complete list items', () => {
+  const completeList = validPage().replace(
+    /## Section 4[\s\S]*$/,
+    '## Section 4\n\n- First supported outcome.\n- Second supported outcome.'
+  );
+  const result = validatePage(completeList, context);
+  assert.equal(codes(result).includes('incomplete_final_section'), false);
+  assert.equal(codes(result).includes('incomplete_ending'), false);
 });
 
 test('rejects shell commands absent from attached sources', () => {
