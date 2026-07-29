@@ -12,6 +12,7 @@ const {
   cleanupManagedKnowledge,
   loadManifest,
   renderFrontmatter,
+  safeManagedPath,
   validateKnowledgeContent,
   writeManifest,
 } = require('../lib/knowledge');
@@ -91,7 +92,7 @@ test('renderFrontmatter includes grounded card metadata', () => {
   assert.match(frontmatter, /---\n$/);
 });
 
-test('knowledge content rejects refusal and short stub artifacts', () => {
+test('knowledge content rejects refusal and empty artifacts', () => {
   assert.equal(
     validateKnowledgeContent(
       'This grounded card explains configuration resolution using `config.json` and runtime environment values.'
@@ -110,8 +111,15 @@ test('knowledge content rejects refusal and short stub artifacts', () => {
     ['knowledge_refusal']
   );
   assert.deepEqual(
-    validateKnowledgeContent('_Not applicable for this module._').violations
-      .map(item => item.code),
+    validateKnowledgeContent('').violations.map(item => item.code),
+    ['knowledge_empty']
+  );
+  assert.equal(
+    validateKnowledgeContent('_Not applicable for this module._').ok,
+    true
+  );
+  assert.deepEqual(
+    validateKnowledgeContent('Done.').violations.map(item => item.code),
     ['knowledge_too_short']
   );
 });
@@ -137,4 +145,21 @@ test('manifest cleanup removes only stale managed files', t => {
   assert.equal(fs.existsSync(path.join(base, 'module/current.md')), true);
   assert.equal(fs.existsSync(path.join(base, 'personal-note.md')), true);
   assert.deepEqual(manifest.files, ['module/current.md']);
+});
+
+test('manifest cleanup never follows a symlinked parent outside the knowledge root', t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-knowledge-link-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const base = path.join(temp, 'knowledge');
+  const outside = path.join(temp, 'outside');
+  fs.mkdirSync(base);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'victim.md'), 'must survive');
+  fs.symlinkSync(outside, path.join(base, 'linked'), 'dir');
+
+  assert.equal(safeManagedPath(base, 'linked/victim.md'), null);
+  const removed = cleanupManagedKnowledge(base, ['linked/victim.md'], []);
+
+  assert.deepEqual(removed, []);
+  assert.equal(fs.readFileSync(path.join(outside, 'victim.md'), 'utf8'), 'must survive');
 });

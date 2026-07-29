@@ -29,7 +29,7 @@ const {
 } = require('./lib/prompts');
 const { moduleMap, titleCase } = require('./lib/modules');
 const { sanitizeCitations } = require('./lib/citations');
-const { normalizePlan, dirOf } = require('./lib/plan');
+const { normalizePlan, dirOf, groupPages } = require('./lib/plan');
 const { buildFilesBlock } = require('./lib/sources');
 const { classifyPage, validatePage } = require('./lib/quality');
 const {
@@ -37,6 +37,7 @@ const {
   cleanupManagedKnowledge,
   loadManifest,
   renderFrontmatter,
+  safeManagedPath,
   validateKnowledgeContent,
   writeManifest,
 } = require('./lib/knowledge');
@@ -259,13 +260,24 @@ function collectKnowledgeEvidence(repoDir, scan) {
   let ok = 0, skipped = 0, failed = 0;
   const currentPaths = new Set(pages.map(p => p.path));
 
-  const pagesByDir = normalized.groups;
   const mainPages = pages.filter(p => !p._landing);
   const landingPages = pages.filter(p => p._landing);
 
   const processPage = async (page) => {
-    if (args.pages && !page.path.includes(args.pages)) { skipped++; return; }
     const outFile = path.join(outDir, page.path);
+    page._published = fs.existsSync(outFile);
+    if (args.pages && !page.path.includes(args.pages)) { skipped++; return; }
+    if (page._landing) {
+      const missing = (page._children || []).filter(child => !child._published);
+      if (missing.length) {
+        failed++;
+        console.log(
+          `  FAIL  ${page.path}: unpublished child page(s): `
+          + missing.map(child => child.path).join(', ')
+        );
+        return;
+      }
+    }
     const {
       block,
       attached,
@@ -284,10 +296,11 @@ function collectKnowledgeEvidence(repoDir, scan) {
       page.title,
       page.description || '',
       JSON.stringify((page._children || []).map(child => [child.path, child.title])),
-      ...attached.map(rel => sha1(rawByPath[rel])),
+      ...attached.map(rel => JSON.stringify([rel, sha1(rawByPath[rel])])),
     ].join('|'));
 
     if (!args.force && state.pages[page.path] === hash && fs.existsSync(outFile)) {
+      page._published = true;
       skipped++;
       console.log(`  SKIP  ${page.path} (unchanged)`);
       return;
@@ -338,11 +351,13 @@ function collectKnowledgeEvidence(repoDir, scan) {
         }
       }
       atomicWrite(outFile, `${md.trim()}\n`);
+      page._published = true;
       state.pages[page.path] = hash;
       saveState();
       ok++;
       console.log(`  OK    ${page.path} (${md.length} chars, ${attached.length} source files)`);
     } catch (err) {
+      page._published = fs.existsSync(outFile);
       failed++;
       console.log(`  FAIL  ${page.path}: ${err.message.split('\n')[0]}`);
     }
@@ -386,12 +401,14 @@ function collectKnowledgeEvidence(repoDir, scan) {
   saveState();
 
   // --- Catalog + navigable index (meta layer) ---
+  const publishedPages = pages.filter(page => page._published);
+  const publishedPaths = new Set(publishedPages.map(page => page.path));
   const catalog = {
     repo: scan.name,
     model: modelName,
     language,
     generatedAt: state.generatedAt,
-    pages: pages.map(p => {
+    pages: publishedPages.map(p => {
       return {
         path: p.path,
         title: p.title,
@@ -399,7 +416,9 @@ function collectKnowledgeEvidence(repoDir, scan) {
         // Real files that reached the model, not the plan's raw list (which may
         // still name paths that don't exist in the repo).
         dependent_files: p._attached || (p.files || []).filter(f => scan.fileSet.has(f)),
-        parent: normalized.parentByPath.get(p.path) || null,
+        parent: publishedPaths.has(normalized.parentByPath.get(p.path))
+          ? normalized.parentByPath.get(p.path)
+          : null,
         isLanding: !!p._landing,
       };
     }),
@@ -412,9 +431,12 @@ function collectKnowledgeEvidence(repoDir, scan) {
 
   // Human-navigable index that works in any markdown viewer.
   const idx = [`# ${scan.name} — Wiki`, ''];
-  for (const p of pages.filter(pg => !dirOf(pg.path))) idx.push(`- [${p.title}](${p.path})`);
-  for (const d of [...pagesByDir.keys()].filter(Boolean).sort()) {
-    const group = pagesByDir.get(d);
+  const publishedByDir = groupPages(publishedPages);
+  for (const p of publishedPages.filter(pg => !dirOf(pg.path))) {
+    idx.push(`- [${p.title}](${p.path})`);
+  }
+  for (const d of [...publishedByDir.keys()].filter(Boolean).sort()) {
+    const group = publishedByDir.get(d);
     const landing = group.find(p => p._landing);
     const children = group.filter(p => !p._landing);
     if (landing) {
@@ -515,8 +537,13 @@ function collectKnowledgeEvidence(repoDir, scan) {
 
     if (knowledgeFailed === 0) {
       const previousManifest = loadManifest(knowledgeBase);
-      for (const [relative, content] of managedContent) {
-        atomicWrite(path.join(knowledgeBase, relative), content);
+      const publishEntries = [...managedContent].map(([relative, content]) => {
+        const managed = safeManagedPath(knowledgeBase, relative);
+        if (!managed) throw new Error(`unsafe managed knowledge path: ${relative}`);
+        return [managed.full, content];
+      });
+      for (const [file, content] of publishEntries) {
+        atomicWrite(file, content);
       }
       const nextFiles = [...managedContent.keys()];
       const removed = cleanupManagedKnowledge(

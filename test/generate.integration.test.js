@@ -75,6 +75,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
       '',
     ].join('\n')
   );
+  fs.copyFileSync(path.join(repo, 'lib/a.js'), path.join(repo, 'lib/b.js'));
   writeJson(path.join(repo, 'config.json'), { mode: 'safe', retries: 2 });
   fs.writeFileSync(path.join(repo, 'guides.md'), 'Run the CLI with the repository path.\n');
 
@@ -134,7 +135,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   writeJson(configPath, {
     default: 'mock',
     language: 'en',
-    maxPages: 4,
+    maxPages: 5,
     template: 'standard',
     models: {
       mock: {
@@ -205,9 +206,49 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     assert.match(card, /\nsource_files:/, relative);
   }
 
+  const startPlan = plan.pages.find(page => page.path === 'guides/start.md');
+  const startCallsBeforeIdentityChange = server.state.byTitle.Start;
+  startPlan.files = ['README.md', 'lib/b.js'];
+  const identityChange = await runGenerator(repo, configPath);
+  assert.equal(identityChange.code, 0, `${identityChange.stderr}\n${identityChange.stdout}`);
+  assert.equal(server.state.byTitle.Start, startCallsBeforeIdentityChange + 1);
+  const identityPage = fs.readFileSync(
+    path.join(contentDir, 'guides/start.md'),
+    'utf8'
+  );
+  assert.match(identityPage, /\[lib\/b\.js\]\(lib\/b\.js\)/);
+  assert.doesNotMatch(identityPage, /\[lib\/a\.js\]\(lib\/a\.js\)/);
+
+  plan.pages.push({
+    path: 'guides/broken.md',
+    title: 'Broken',
+    description: 'A newly planned page that must not be advertised if generation fails.',
+    files: ['README.md'],
+  });
+  behavior.alwaysFailTitle = 'Broken';
+  const newPageFailure = await runGenerator(repo, configPath);
+  assert.equal(
+    newPageFailure.code,
+    1,
+    `${newPageFailure.stderr}\n${newPageFailure.stdout}`
+  );
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/broken.md')), false);
+  const failedCatalog = JSON.parse(
+    fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
+  );
+  assert.equal(
+    failedCatalog.pages.some(page => page.path === 'guides/broken.md'),
+    false
+  );
+  const failedIndex = fs.readFileSync(path.join(contentDir, 'index.md'), 'utf8');
+  assert.doesNotMatch(failedIndex, /Broken|broken\.md/);
+  assert.doesNotMatch(fs.readFileSync(landingPath, 'utf8'), /Broken|broken\.md/);
+  plan.pages.pop();
+  behavior.alwaysFailTitle = null;
+
   const protectedPage = path.join(contentDir, 'guides/start.md');
   const lastKnownGood = fs.readFileSync(protectedPage);
-  fs.appendFileSync(path.join(repo, 'lib/a.js'), '// changed source\n');
+  fs.appendFileSync(path.join(repo, 'lib/b.js'), '// changed source\n');
   behavior.alwaysFailTitle = 'Start';
   const repairCountBeforeFailure = server.state.repairRequests;
   const failed = await runGenerator(repo, configPath);

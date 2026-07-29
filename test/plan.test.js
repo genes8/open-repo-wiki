@@ -49,6 +49,20 @@ test('normalizePlan recognizes explicit landings and enforces the final hard cap
   );
 });
 
+test('hard-cap recomputation clears stale explicit landing metadata', () => {
+  const result = normalizePlan([
+    { path: 'overview.md', title: 'Overview', files: ['README.md'] },
+    { path: 'guides/guides.md', title: 'Guides', files: ['README.md'] },
+    { path: 'guides/a.md', title: 'A', files: ['lib/a.js'] },
+    { path: 'guides/b.md', title: 'B', files: ['lib/b.js'] },
+  ], scan, { maxPages: 2 });
+
+  const formerLanding = result.pages.find(page => page.path === 'guides/guides.md');
+  assert.equal(formerLanding._landing, undefined);
+  assert.equal(formerLanding._children, undefined);
+  assert.deepEqual([...result.parentByPath], []);
+});
+
 test('normalizePlan rejects plans without overview.md', () => {
   assert.throws(
     () => normalizePlan([{ path: 'guide.md', title: 'Guide', files: [] }], scan, { maxPages: 5 }),

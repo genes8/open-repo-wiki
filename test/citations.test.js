@@ -82,3 +82,16 @@ test('top citation inventory rejects unattached files', () => {
   assert.equal(result.violations[0].code, 'citation_unattached');
   assert.doesNotMatch(result.md, /lib\/missing\.js/);
 });
+
+test('structured bullets cannot hide a second unvalidated citation link', () => {
+  const md = pageWithSection('lib/a.js#L2-L8').replace(
+    '- [source](lib/a.js#L2-L8)',
+    '- [source](lib/a.js#L2-L8) and [hidden](lib/missing.js#L1-L2)'
+  );
+  const result = sanitizeCitations(md, attached, lineCounts);
+
+  assert.equal(result.validRanges, 0);
+  assert.ok(result.violations.some(item => item.code === 'citation_item_format'));
+  assert.doesNotMatch(result.md, /lib\/missing\.js/);
+  assert.doesNotMatch(result.md, /\*\*Section sources\*\*/);
+});
