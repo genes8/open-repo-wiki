@@ -69,9 +69,30 @@ node generate.js [repoDir] [options]
                         (grounding citations without TOC guidance)
       --knowledge       also generate semantic module and cross-cutting knowledge cards
       --force           ignore the incremental cache
-      --dry-run         show the wiki plan, write nothing
+      --dry-run         validate/show the plan and write diagnostics, but do not
+                        stage or publish wiki output
+      --prune           delete managed pages omitted by a successful,
+                        non-regressive full plan
+      --accept-plan-shrink
+                        accept a regressive plan and delete omitted managed pages
+                        (cannot be combined with --pages)
       --list-models     show all profiles and whether API keys are set
 ```
+
+Deletion is opt-in. A normal successful run keeps previously managed pages that
+the newest plan omits and keeps them in the catalog/index. Use `--prune` only
+when the new full plan should replace that retained set. Use
+`--accept-plan-shrink` when a deliberate large plan reduction should bypass the
+regression gate and remove omitted pages. `--pages` cannot be combined with
+either deletion flag because a selective run cannot prove that other pages are
+stale.
+
+The default structured output keeps metadata, knowledge, and diagnostics under
+the repository's `.local-wiki/` root. For a flat custom path such as
+`--out /tmp/wiki-out`, the catalog remains in the direct sibling
+`/tmp/meta/` (for exporter compatibility), while diagnostics and knowledge are
+isolated under `/tmp/wiki-out.local-wiki/`; they are never derived as `/runs`
+or `/knowledge`.
 
 ## CLI — export.js
 
@@ -112,6 +133,7 @@ in a target repository to override per-project. Profile fields:
       "gpuLayers": "max",                        // llamacpp provider
       "contextChars": 24000,                     // source-code budget per page prompt
       "maxTokens": 4096,                         // completion cap
+      "retries": 2,                              // provider retries per request
       "concurrency": 4,                          // parallel page generation (default 1)
       "temperature": 0.3
     }
@@ -169,25 +191,37 @@ Notes:
 ```mermaid
 graph LR
   A[scan repo<br/>tree, key files, .gitignore] --> B[stage 1: model plans<br/>wiki structure as JSON]
-  B --> C[normalize plan<br/>hard cap + landings]
-  C --> D[model writes from<br/>numbered source lines]
-  D --> E{quality + citation<br/>validation}
-  E -->|invalid| F[targeted repair<br/>up to two times]
-  F --> E
-  E -->|valid| G[atomic publish]
-  G --> H[.local-wiki/en/content/*.md]
-  H --> I[export.js -> PDF]
+  B --> C[normalize + validate<br/>retry suspicious plans]
+  C --> D[copy live wiki to<br/>sibling staging trees]
+  D --> E[model writes from<br/>numbered source lines]
+  E --> F{quality + citation<br/>validation}
+  F -->|invalid| G[targeted repair<br/>up to two times]
+  G --> F
+  F -->|all artifacts valid| H[commit content + meta<br/>+ requested knowledge]
+  H --> I[.local-wiki/en/content/*.md]
+  I --> J[export.js -> PDF]
 ```
 
 - **Deterministic plan:** planner paths and source lists are validated against the
   scan. Every final directory with two or more content pages gets exactly one
   landing page, even when the model omitted it. Landings are generated after
-  their children, and the final page count never exceeds `maxPages`.
-- **Incremental:** `.state.json` stores a generation-schema version and a hash of
+  their children, singleton directories and one-child landings are rejected,
+  and the final page count never exceeds `maxPages`. Compared with the last
+  successful plan, losing more than 25% of pages or any previously covered key
+  topic triggers a planner repair; three rejected plans abort before staging.
+- **Transactional:** content, catalog/index/state, and requested knowledge cards
+  are built in sibling staging trees. They become live only after every planned
+  page and knowledge card succeeds. A page, card, derived-output, or commit
+  failure removes the stages and restores any renamed live trees, so a failed
+  run cannot partially publish or perform stale cleanup.
+- **Incremental:** schema-3 `.state.json` stores source-backed page hashes,
+  published metadata, the last successful normalized plan, and the last
+  committed run ID. The hash includes
   the model/language/template/page metadata plus the raw contents of source files
-  actually attached to that page. Unchanged pages are skipped, dropped pages are
-  removed, and state changes only after a validated page is atomically published.
-  A failed regeneration keeps its previous page and previous hash.
+  actually attached to that page. Unchanged pages are skipped. Omitted pages are
+  retained by default and are deleted only with `--prune` or
+  `--accept-plan-shrink`; state changes become live only with the complete
+  transaction.
 - **Parallel:** set `concurrency` in a profile (or pass `--concurrency N`) to
   generate pages through a worker pool — most useful for online APIs.
 - **Grounded:** file paths the model hallucinates in the plan are dropped;
@@ -195,8 +229,10 @@ graph LR
 - **Quality-gated:** pages must match their planned H1, bounded depth profile,
   citation requirements, Markdown-fence balance, and landing-child links.
   Refusals, apology/tool-failure text, empty inline code, shallow output, padding,
-  and excessive diagrams are rejected. The generator makes up to two targeted
-  repair attempts, then reports a non-zero exit without publishing bad output.
+  excessive diagrams, provider token-limit completions, incomplete final
+  sections, and shell commands absent from the prompt-visible attached source
+  are rejected. The generator makes up to two targeted repair attempts, then
+  reports a non-zero exit without publishing any part of the run.
 - **Reasoning-model safe:** `think: false` is sent to Ollama thinking models
   (with fallback), complete reasoning blocks are stripped only when they occur at
   the beginning of an answer, and literal inline `<think>...</think>` examples
@@ -236,6 +272,33 @@ The generator verifies that the file was attached and that
 out-of-bounds ranges are removed and sent back to the repair prompt; ranges are
 never silently clamped or invented.
 
+### Run diagnostics
+
+Every standard-layout run writes a durable audit trail outside the publication
+transaction:
+
+```text
+.local-wiki/runs/<run-id>/
+  run.json
+  plan/attempt-1.raw.txt
+  plan/attempt-1.json
+  plan/accepted.normalized.json
+  pages/<page-path>/attempt-1.md
+  pages/<page-path>/attempt-1.json
+  knowledge/<card-path>/attempt-1.md
+  knowledge/<card-path>/attempt-1.json
+```
+
+With a flat custom `--out <dir>`, the same `runs/` tree lives under
+`<dir>.local-wiki/`.
+
+Rejected retries remain available after an abort. Attempt metadata includes the
+provider/model, API `finish_reason`, token usage when supplied, deterministic
+violation codes, page statistics, and accepted/rejected status. `run.json`
+finishes as `committed`, `aborted`, or `dry-run`. Prompts, API keys,
+authorization headers, `.env` contents, and full attached source blocks are not
+stored.
+
 ### Knowledge cards
 
 Pass `--knowledge` (or set `"knowledge": true`) to write
@@ -247,8 +310,9 @@ configuration, error handling, logging, and dependency management.
 Every card has YAML frontmatter containing `kind`, `category`, `name`, `scope`,
 and `source_files`. Stable identities remove duplicates before model calls.
 `_manifest.json` records generator-managed files; stale managed files are
-removed only after a fully successful knowledge pass, while unlisted user files
-are preserved.
+removed only inside the staged tree after a fully successful knowledge pass,
+while unlisted user files are preserved. Knowledge output commits in the same
+transaction as content and metadata.
 
 ## Test and smoke test (no model needed)
 

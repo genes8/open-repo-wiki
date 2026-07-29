@@ -1,7 +1,7 @@
 # Transactional Generation Safety Design
 
 **Date:** 2026-07-29
-**Status:** Approved
+**Status:** Implemented
 
 ## Context
 
