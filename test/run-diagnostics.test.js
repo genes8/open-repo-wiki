@@ -77,3 +77,24 @@ test('rejects unsafe run IDs before creating output', t => {
     /unsafe diagnostic run ID/
   );
 });
+
+test('keeps diagnostic page paths distinct after encoding', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-runs-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const diagnostics = createRunDiagnostics(root, {
+    runId: '20260729T120001Z-456',
+  });
+
+  diagnostics.recordPageAttempt('guides/a b.md', 1, '# Space', {});
+  diagnostics.recordPageAttempt('guides/a-b.md', 1, '# Dash', {});
+
+  const pageRoot = path.join(diagnostics.dir, 'pages/guides');
+  const attempts = fs.readdirSync(pageRoot)
+    .map(name => path.join(pageRoot, name, 'attempt-1.md'))
+    .filter(file => fs.existsSync(file));
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(
+    attempts.map(file => fs.readFileSync(file, 'utf8')).sort(),
+    ['# Dash', '# Space']
+  );
+});
