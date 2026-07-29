@@ -188,6 +188,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
 
   const knowledgeIndex = fs.readFileSync(path.join(knowledgeDir, '_index.yaml'), 'utf8');
   assert.match(knowledgeIndex, /title: "Core Libraries"/);
+  assert.match(knowledgeIndex, /title: "Core Libraries"[\s\S]*children: \[\]/);
   const manifest = JSON.parse(
     fs.readFileSync(path.join(knowledgeDir, '_manifest.json'), 'utf8')
   );

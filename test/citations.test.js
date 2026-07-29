@@ -37,6 +37,16 @@ test('valid whole-file inventory and ranged section citation survive', () => {
   });
 });
 
+test('structured source lists allow a blank line before ranged bullets', () => {
+  const md = pageWithSection('lib/a.js#L2-L8')
+    .replace('**Section sources**\n-', '**Section sources**\n\n-');
+  const result = sanitizeCitations(md, attached, lineCounts);
+
+  assert.equal(result.validRanges, 1);
+  assert.deepEqual(result.violations, []);
+  assert.match(result.md, /\*\*Section sources\*\*\n\n- \[source\]/);
+});
+
 test('malformed range is dropped with citation_range_format', () => {
   const result = sanitizeCitations(pageWithSection('lib/a.js#L2-8'), attached, lineCounts);
   assert.equal(result.validRanges, 0);

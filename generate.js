@@ -451,10 +451,18 @@ function collectKnowledgeEvidence(repoDir, scan) {
       yaml.push(`    ${JSON.stringify(m.key)}:`);
       yaml.push(`        dir_name: ${JSON.stringify(m.dir)}`);
       yaml.push(`        title: ${JSON.stringify(m.title)}`);
-      yaml.push('        scope:');
-      for (const f of m.scope) yaml.push(`            - ${JSON.stringify(f)}`);
-      yaml.push('        children:');
-      for (const c of m.children) yaml.push(`            - ${JSON.stringify(c)}`);
+      if (m.scope.length) {
+        yaml.push('        scope:');
+        for (const f of m.scope) yaml.push(`            - ${JSON.stringify(f)}`);
+      } else {
+        yaml.push('        scope: []');
+      }
+      if (m.children.length) {
+        yaml.push('        children:');
+        for (const c of m.children) yaml.push(`            - ${JSON.stringify(c)}`);
+      } else {
+        yaml.push('        children: []');
+      }
     }
     managedContent.set('_index.yaml', `${yaml.join('\n')}\n`);
 
@@ -463,9 +471,12 @@ function collectKnowledgeEvidence(repoDir, scan) {
         'schema_version: 1',
         `module_path: ${JSON.stringify(m.path)}`,
         `title: ${JSON.stringify(m.title)}`,
-        'scope:',
-        ...m.scope.map(f => `    - ${JSON.stringify(f)}`),
       ];
+      if (m.scope.length) {
+        mod.push('scope:', ...m.scope.map(f => `    - ${JSON.stringify(f)}`));
+      } else {
+        mod.push('scope: []');
+      }
       managedContent.set(`${m.dir}/_module.yaml`, `${mod.join('\n')}\n`);
     }
 

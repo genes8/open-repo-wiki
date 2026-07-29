@@ -10,6 +10,7 @@ const scan = {
 
 test('normalizePlan filters paths/files and synthesizes one landing per grouped directory', () => {
   const result = normalizePlan([
+    null,
     { path: 'overview.md', title: 'Overview', files: ['README.md', 'missing.js'] },
     { path: 'guides/start.md', title: 'Start', files: ['README.md'] },
     { path: 'guides/config.md', title: 'Config', files: ['config.json'] },

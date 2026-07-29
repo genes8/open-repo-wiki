@@ -104,6 +104,12 @@ test('knowledge content rejects refusal and short stub artifacts', () => {
     ['knowledge_refusal']
   );
   assert.deepEqual(
+    validateKnowledgeContent(
+      'Please provide the source files so this knowledge card can be completed with repository evidence.'
+    ).violations.map(item => item.code),
+    ['knowledge_refusal']
+  );
+  assert.deepEqual(
     validateKnowledgeContent('_Not applicable for this module._').violations
       .map(item => item.code),
     ['knowledge_too_short']
