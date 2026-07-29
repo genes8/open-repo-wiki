@@ -505,7 +505,15 @@ let publicationCommitted = false;
   const landingPages = pages.filter(p => p._landing);
 
   const processPage = async (page) => {
-    const outFile = path.join(outDir, page.path);
+    const managedOutput = safeManagedPath(outDir, page.path);
+    if (!managedOutput) {
+      page._publishedMetadata = null;
+      page._published = false;
+      failed++;
+      console.log(`  FAIL  ${page.path}: unsafe staged page path`);
+      return;
+    }
+    const outFile = managedOutput.full;
     const existingMetadata = priorMetadataByPath.get(page.path) || null;
     page._publishedMetadata = fs.existsSync(outFile) ? existingMetadata : null;
     page._published = !!page._publishedMetadata;

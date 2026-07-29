@@ -208,7 +208,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
 
   const address = server.address();
   const configPath = path.join(repo, 'repo-wiki.config.json');
-  writeJson(configPath, {
+  const mockConfig = {
     default: 'mock',
     language: 'en',
     maxPages: 5,
@@ -222,7 +222,8 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
         maxTokens: 4096,
       },
     },
-  });
+  };
+  writeJson(configPath, mockConfig);
 
   const contentDir = path.join(repo, '.local-wiki/en/content');
   const metaDir = path.join(repo, '.local-wiki/en/meta');
@@ -325,6 +326,32 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     assert.match(card, /^---\nkind: /, relative);
     assert.match(card, /\nsource_files:/, relative);
   }
+
+  mockConfig.maxPages = 8;
+  writeJson(configPath, mockConfig);
+  plan.pages.push(
+    {
+      path: 'linked/one.md',
+      title: 'Linked One',
+      description: 'Must never write through a staged symlink.',
+      files: ['README.md'],
+    },
+    {
+      path: 'linked/two.md',
+      title: 'Linked Two',
+      description: 'Must never write through a staged symlink.',
+      files: ['README.md'],
+    }
+  );
+  const beforeUnsafePlan = snapshotWiki(repo);
+  const outsideBeforeUnsafePlan = snapshotTree(linkedOutside);
+  const unsafePlan = await runGenerator(repo, configPath);
+  assert.equal(unsafePlan.code, 1, `${unsafePlan.stderr}\n${unsafePlan.stdout}`);
+  assert.deepEqual(snapshotWiki(repo), beforeUnsafePlan);
+  assert.deepEqual(snapshotTree(linkedOutside), outsideBeforeUnsafePlan);
+  plan.pages.splice(-2);
+  mockConfig.maxPages = 5;
+  writeJson(configPath, mockConfig);
 
   const collapsedPlan = {
     pages: [{
