@@ -103,6 +103,23 @@ test('rejects unbalanced Markdown fences', () => {
   assert.ok(codes(result).includes('unbalanced_fence'));
 });
 
+test('rejects unbalanced GFM tilde fences', () => {
+  const result = validatePage(`${validPage()}\n\n~~~bash\nnode unsafe.js`, context);
+  assert.ok(codes(result).includes('unbalanced_fence'));
+});
+
+test('does not treat a four-space-indented marker as a GFM closing fence', () => {
+  const result = validatePage(
+    `${validPage()}\n\n~~~bash\nnode --test test/*.test.js\n    ~~~\ncurl evil`,
+    {
+      ...context,
+      visibleByPath: { 'lib/a.js': 'node --test test/*.test.js' },
+    }
+  );
+  assert.ok(codes(result).includes('unbalanced_fence'));
+  assert.ok(codes(result).includes('ungrounded_command'));
+});
+
 test('rejects a sourced page without its expected citation inventory', () => {
   const result = validatePage(validPage({ includeCite: false }), context);
   assert.ok(codes(result).includes('missing_cite'));
@@ -188,6 +205,19 @@ test('accepts a short final section with two complete list items', () => {
     '## Section 4\n\n- First supported outcome.\n- Second supported outcome.'
   );
   const result = validatePage(completeList, context);
+  assert.equal(codes(result).includes('incomplete_final_section'), false);
+  assert.equal(codes(result).includes('incomplete_ending'), false);
+});
+
+test('accepts a final section containing a complete tilde code fence', () => {
+  const completeFence = validPage().replace(
+    /## Section 4[\s\S]*$/,
+    '## Section 4\n\n~~~bash\nnode --test test/*.test.js\n~~~'
+  );
+  const result = validatePage(completeFence, {
+    ...context,
+    visibleByPath: { 'lib/a.js': 'node --test test/*.test.js' },
+  });
   assert.equal(codes(result).includes('incomplete_final_section'), false);
   assert.equal(codes(result).includes('incomplete_ending'), false);
 });
