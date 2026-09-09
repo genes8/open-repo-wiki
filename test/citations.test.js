@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseRangeTarget, sanitizeCitations } = require('../lib/citations');
+const { parseRangeTarget, repairRange, sanitizeCitations } = require('../lib/citations');
 
 const attached = ['lib/a.js'];
 const lineCounts = { 'lib/a.js': 20 };
@@ -47,21 +47,40 @@ test('structured source lists allow a blank line before ranged bullets', () => {
   assert.match(result.md, /\*\*Section sources\*\*\n\n- \[source\]/);
 });
 
-test('malformed range is dropped with citation_range_format', () => {
+test('malformed range on an attached path is repaired deterministically', () => {
   const result = sanitizeCitations(pageWithSection('lib/a.js#L2-8'), attached, lineCounts);
-  assert.equal(result.validRanges, 0);
-  assert.equal(result.violations[0].code, 'citation_range_format');
-  assert.doesNotMatch(result.md, /\*\*Section sources\*\*/);
+  assert.equal(result.validRanges, 1);
+  assert.equal(result.repaired, 1);
+  assert.equal(result.dropped, 0);
+  assert.deepEqual(result.violations, []);
+  assert.match(result.md, /\[lib\/a\.js:L2-L8\]\(lib\/a\.js#L2-L8\)/);
 });
 
-test('reversed range is dropped with citation_range_order', () => {
+test('rangeless citation on an attached path falls back to the whole file', () => {
+  const result = sanitizeCitations(pageWithSection('lib/a.js'), attached, lineCounts);
+  assert.equal(result.validRanges, 1);
+  assert.equal(result.repaired, 1);
+  assert.match(result.md, /\[lib\/a\.js:L1-L20\]\(lib\/a\.js#L1-L20\)/);
+});
+
+test('reversed range is repaired by swapping its endpoints', () => {
   const result = sanitizeCitations(pageWithSection('lib/a.js#L8-L2'), attached, lineCounts);
-  assert.equal(result.violations[0].code, 'citation_range_order');
+  assert.equal(result.validRanges, 1);
+  assert.deepEqual(result.violations, []);
+  assert.match(result.md, /\[lib\/a\.js:L2-L8\]\(lib\/a\.js#L2-L8\)/);
 });
 
-test('out-of-bounds range is dropped with citation_range_bounds', () => {
+test('out-of-bounds range is clamped to the real line count', () => {
   const result = sanitizeCitations(pageWithSection('lib/a.js#L1-L99'), attached, lineCounts);
-  assert.equal(result.violations[0].code, 'citation_range_bounds');
+  assert.equal(result.validRanges, 1);
+  assert.deepEqual(result.violations, []);
+  assert.match(result.md, /\[lib\/a\.js:L1-L20\]\(lib\/a\.js#L1-L20\)/);
+});
+
+test('repairRange refuses when the true line count is unknown', () => {
+  assert.equal(repairRange('lib/a.js#L2-8', undefined), null);
+  assert.equal(repairRange('lib/a.js#L2-8', 0), null);
+  assert.deepEqual(repairRange('lib/a.js', 20), { start: 1, end: 20 });
 });
 
 test('unattached range is dropped with citation_unattached', () => {
