@@ -58,10 +58,10 @@ Options:
       --template <name> page template: "standard" (citations + TOC) or "minimal"
       --knowledge       also generate the structured knowledge-card layer.
                         Written to <root>/knowledge/<lang> (a sibling of the
-                        content-language dir, mirroring Qoder's repowiki layout);
-                        assumes the default <root>/<lang>/content output tree. With
-                        a custom flat --out the tree is placed two levels up from
-                        --out and may fall outside it.
+                        content-language dir, mirroring Qoder's repowiki layout)
+                        when the default <root>/<lang>/content tree is used;
+                        with a custom --out it stays contained inside
+                        <out>/.knowledge/<lang> (meta likewise in <out>/.meta).
       --force           regenerate everything, ignore the incremental cache
       --dry-run         print the wiki plan and exit without writing pages
       --list-models     list configured model profiles and exit
@@ -90,6 +90,37 @@ function parseArgs(argv) {
     else args._.push(a);
   }
   return args;
+}
+
+// Zero-dependency .env loader. Reads KEY=VALUE lines from <repoDir>/.env then
+// <appDir>/.env into process.env WITHOUT overriding vars already set in the real
+// environment (real env always wins). Keeps secrets out of the committed config:
+// config.json only references env var NAMES ("env:ZHIPU_API_KEY"), the values
+// live in an untracked .env file. Supports optional `export ` prefix, # comments,
+// and single/double quoted values.
+function loadDotenv(repoDir) {
+  const files = [path.join(repoDir, '.env'), path.join(__dirname, '.env')];
+  let loaded = 0;
+  for (const file of files) {
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    for (const rawLine of text.split(/\r?\n/)) {
+      let line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      if (line.startsWith('export ')) line = line.slice(7).trim();
+      const eq = line.indexOf('=');
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      if (!key || Object.prototype.hasOwnProperty.call(process.env, key)) continue;
+      let val = line.slice(eq + 1).trim();
+      if (val.length >= 2 && ((val[0] === '"' && val.endsWith('"')) || (val[0] === "'" && val.endsWith("'")))) {
+        val = val.slice(1, -1);
+      }
+      process.env[key] = val;
+      loaded++;
+    }
+  }
+  if (loaded) console.log(`  loaded .env (${loaded} var${loaded === 1 ? '' : 's'})`);
 }
 
 function loadConfig(args, repoDir) {
@@ -187,6 +218,7 @@ function normalizePublishedMetadata(value, fallbackPath = '') {
         .filter(Boolean)
     )],
     isLanding: value.isLanding === true,
+    quality: value.quality === 'degraded' ? 'degraded' : 'ok',
     child_paths: [...new Set(
       (Array.isArray(value.child_paths) ? value.child_paths : [])
         .map(child => canonicalRelativePath(child, { markdown: true }))
@@ -225,6 +257,7 @@ function snapshotPageMetadata(page, attached) {
     description: page._desc0 || page.description || '',
     dependent_files: [...attached],
     isLanding: !!page._landing,
+    quality: 'ok',
     child_paths: (page._children || []).map(child => child.path),
   };
 }
@@ -258,6 +291,8 @@ function collectKnowledgeEvidence(repoDir, scan) {
     process.exit(1);
   }
 
+  loadDotenv(repoDir); // populate process.env from .env before any key resolution
+
   const { config, configPath } = loadConfig(args, repoDir);
   if (args.listModels) { listModels(config); process.exit(0); }
 
@@ -268,13 +303,19 @@ function collectKnowledgeEvidence(repoDir, scan) {
   const language = config.language || 'en';
   const contextChars = profile.contextChars || 24000;
   const template = args.template || config.template || 'standard';
-  // Sibling output trees derived from the content dir: <content>/../meta and
-  // <root>/knowledge/<lang> (mirrors Qoder's repowiki layout). metaDir is kept as
-  // the direct sibling of the content dir so export.js (which resolves the catalog
-  // at <SRC>/../meta) finds it for ANY --out location, not just the default tree.
+  // Output layout. The default tree mirrors Qoder's repowiki layout with meta
+  // and knowledge as siblings of the content dir. A custom --out that is not a
+  // .../content dir keeps both trees INSIDE the output dir (dot-dirs), so a
+  // run never writes outside the location the user chose (e.g. --out /tmp/x
+  // must not create /tmp/meta). export.js checks both catalog locations.
+  const standardLayout = path.basename(outDir) === 'content';
   const localWikiRoot = path.resolve(outDir, '..', '..');
-  const metaDir = path.join(outDir, '..', 'meta');
-  const knowledgeBase = path.join(localWikiRoot, 'knowledge', language);
+  const metaDir = standardLayout
+    ? path.join(outDir, '..', 'meta')
+    : path.join(outDir, '.meta');
+  const knowledgeBase = standardLayout
+    ? path.join(localWikiRoot, 'knowledge', language)
+    : path.join(outDir, '.knowledge', language);
 
   console.log(`Repo:   ${repoDir}`);
   console.log(`Model:  ${modelName} (${profile.provider}: ${profile.model || profile.modelPath})`);
@@ -289,37 +330,9 @@ function collectKnowledgeEvidence(repoDir, scan) {
   }
   console.log(`  ${scan.files.length} files considered\n`);
 
-  // --- Stage 1: wiki structure plan ---
-  console.log('Planning wiki structure...');
-  const planRaw = await chat(profile, planMessages(scan, { maxPages }), { maxTokens: profile.maxTokens });
-  let plan;
-  try {
-    plan = extractJson(planRaw);
-  } catch (err) {
-    const dump = path.join(repoDir, '.local-wiki-plan-error.txt');
-    fs.mkdirSync(path.dirname(dump), { recursive: true });
-    fs.writeFileSync(dump, planRaw);
-    console.error(`Plan failed: ${err.message} (raw output saved to ${dump})`);
-    process.exit(1);
-  }
-  let normalized;
-  try {
-    normalized = normalizePlan(plan.pages, scan, { maxPages });
-  } catch (err) {
-    console.error(`Plan failed validation: ${err.message}`);
-    process.exit(1);
-  }
-  const pages = normalized.pages;
-  console.log(`  ${pages.length} pages planned:`);
-  for (const p of pages) console.log(`    - ${p.path}  (${p.title})`);
-
-  if (args.dryRun) {
-    console.log('\nDry run — no pages written.');
-    process.exit(0);
-  }
-
-  // --- Stage 2: generate pages (incremental, optionally parallel) ---
-  fs.mkdirSync(outDir, { recursive: true });
+  // Prior state/catalog are loaded before planning so the planner can be
+  // anchored on previously published pages (stable paths and titles across
+  // runs, no destructive re-plans from LLM non-determinism).
   let state = { model: modelName, pages: {} };
   try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch { /* first run */ }
   if (!state.pages) state.pages = {};
@@ -332,6 +345,68 @@ function collectKnowledgeEvidence(repoDir, scan) {
     if (metadata) priorMetadataByPath.set(pagePath, metadata);
   }
   state.pageMetadata = Object.fromEntries(priorMetadataByPath);
+
+  // --- Stage 1: wiki structure plan ---
+  console.log('Planning wiki structure...');
+  // Lower bound scaled to repository size; a too-small plan is replanned so a
+  // single weak LLM response cannot collapse a 16-page wiki into 6 pages.
+  const minPages = Math.min(
+    maxPages,
+    Math.max(4, parseInt(config.minPages, 10) || Math.ceil(scan.files.length / 3))
+  );
+  const priorPages = [...priorMetadataByPath.values()]
+    .map(metadata => ({ path: metadata.path, title: metadata.title }));
+  let normalized = null;
+  let lastPlanError = null;
+  let lastPlanRaw = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const planRaw = await chat(
+      profile,
+      planMessages(scan, { maxPages, minPages, priorPages }),
+      { maxTokens: profile.maxTokens }
+    );
+    let candidate;
+    try {
+      candidate = normalizePlan(extractJson(planRaw).pages, scan, { maxPages });
+    } catch (err) {
+      lastPlanError = err;
+      lastPlanRaw = planRaw;
+      console.log(`  plan attempt ${attempt + 1}/3 invalid: ${err.message}`);
+      continue;
+    }
+    // Best-of: keep the largest valid plan seen across attempts.
+    if (!normalized || candidate.pages.length > normalized.pages.length) {
+      normalized = candidate;
+    }
+    if (normalized.pages.length >= minPages) break;
+    if (attempt < 2) {
+      console.log(
+        `  plan attempt ${attempt + 1}/3: ${candidate.pages.length} pages `
+        + `(< ${minPages}), replanning...`
+      );
+    }
+  }
+  if (!normalized) {
+    const dump = path.join(repoDir, '.local-wiki-plan-error.txt');
+    fs.mkdirSync(path.dirname(dump), { recursive: true });
+    fs.writeFileSync(dump, lastPlanRaw);
+    console.error(`Plan failed: ${lastPlanError.message} (raw output saved to ${dump})`);
+    process.exit(1);
+  }
+  if (normalized.pages.length < minPages) {
+    console.log(`  WARN plan stayed below ${minPages} pages after 3 attempts; continuing`);
+  }
+  const pages = normalized.pages;
+  console.log(`  ${pages.length} pages planned:`);
+  for (const p of pages) console.log(`    - ${p.path}  (${p.title})`);
+
+  if (args.dryRun) {
+    console.log('\nDry run — no pages written.');
+    process.exit(0);
+  }
+
+  // --- Stage 2: generate pages (incremental, optionally parallel) ---
+  fs.mkdirSync(outDir, { recursive: true });
   // State is persisted after every page so an interrupted run resumes where it stopped
   const saveState = () => {
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
@@ -342,7 +417,7 @@ function collectKnowledgeEvidence(repoDir, scan) {
     || profile.concurrency || config.concurrency || 1);
   if (concurrency > 1) console.log(`  concurrency: ${concurrency}`);
 
-  let ok = 0, skipped = 0, failed = 0;
+  let ok = 0, skipped = 0, degraded = 0, failed = 0;
   const currentPaths = new Set(pages.map(p => p.path));
 
   const mainPages = pages.filter(p => !p._landing);
@@ -406,14 +481,23 @@ function collectKnowledgeEvidence(repoDir, scan) {
       return;
     }
     if (page._landing) {
-      const missing = (page._children || []).filter(child => !child._published);
-      if (missing.length) {
+      const children = page._children || [];
+      const missing = children.filter(child => !child._published);
+      // Fail-soft: a landing renders whatever children DID publish. Only when
+      // no child made it is there nothing to link, so the landing fails.
+      if (missing.length && missing.length === children.length) {
         failed++;
         console.log(
-          `  FAIL  ${page.path}: unpublished child page(s): `
+          `  FAIL  ${page.path}: no published child page(s): `
           + missing.map(child => child.path).join(', ')
         );
         return;
+      }
+      if (missing.length) {
+        console.log(
+          `  note  ${page.path}: landing published without unpublished child(ren): `
+          + missing.map(child => child.path).join(', ')
+        );
       }
     }
     try {
@@ -428,6 +512,10 @@ function collectKnowledgeEvidence(repoDir, scan) {
       let rejected = '';
       let validation;
       let md = '';
+      // Best-of across attempts: repair rounds can regress with small models,
+      // so keep the least-broken structurally sound draft as a fail-soft
+      // fallback instead of always judging the (possibly worst) last attempt.
+      let best = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         const messages = attempt === 0
           ? pageMessages(scan, generationPage, block, promptOptions)
@@ -452,27 +540,57 @@ function collectKnowledgeEvidence(repoDir, scan) {
           attached,
           citationResult,
         });
+        if (citationResult.repaired) {
+          console.log(
+            `  note  ${page.path}: repaired ${citationResult.repaired} citation range(s)`
+          );
+        }
         if (citationResult.dropped) {
           console.log(
             `  note  ${page.path}: dropped ${citationResult.dropped} invalid citation item(s)`
           );
         }
         if (validation.ok) break;
-        const codes = [...new Set(validation.violations.map(item => item.code))].join(',');
+        const codes = [...new Set(validation.violations.map(item => item.code))];
+        // A draft qualifies for degraded publishing only when its skeleton is
+        // sound: real content, single H1, balanced fences, and no refusal.
+        const publishable = md.trim().length > 0
+          && !codes.includes('refusal_text')
+          && !codes.includes('h1_count')
+          && !codes.includes('unbalanced_fence');
+        if (publishable && (!best || validation.violations.length < best.violations.length)) {
+          best = { md, violations: validation.violations };
+        }
         if (attempt < 2) {
-          console.log(`  REPAIR ${page.path} attempt ${attempt + 1}/2 (${codes})`);
-        } else {
-          throw new Error(`quality validation failed after 3 attempts (${codes})`);
+          console.log(`  REPAIR ${page.path} attempt ${attempt + 1}/2 (${codes.join(',')})`);
         }
       }
-      atomicWrite(outFile, `${md.trim()}\n`);
-      page._publishedMetadata = currentMetadata;
-      page._published = true;
-      state.pages[page.path] = hash;
-      state.pageMetadata[page.path] = currentMetadata;
-      saveState();
-      ok++;
-      console.log(`  OK    ${page.path} (${md.length} chars, ${attached.length} source files)`);
+      if (validation.ok) {
+        atomicWrite(outFile, `${md.trim()}\n`);
+        page._publishedMetadata = currentMetadata;
+        page._published = true;
+        state.pages[page.path] = hash;
+        state.pageMetadata[page.path] = currentMetadata;
+        saveState();
+        ok++;
+        console.log(`  OK    ${page.path} (${md.length} chars, ${attached.length} source files)`);
+      } else if (best) {
+        // Fail-soft: an imperfect page beats a hole in the wiki. Publish the
+        // best draft, flag it, and leave it hash-less so the next run retries.
+        const codes = [...new Set(best.violations.map(item => item.code))].join(',');
+        const degradedMetadata = { ...currentMetadata, quality: 'degraded' };
+        atomicWrite(outFile, `${best.md.trim()}\n`);
+        page._publishedMetadata = degradedMetadata;
+        page._published = true;
+        delete state.pages[page.path];
+        state.pageMetadata[page.path] = degradedMetadata;
+        saveState();
+        degraded++;
+        console.log(`  WARN  ${page.path}: published degraded after 3 attempts (${codes})`);
+      } else {
+        const codes = [...new Set(validation.violations.map(item => item.code))].join(',');
+        throw new Error(`quality validation failed after 3 attempts (${codes})`);
+      }
     } catch (err) {
       page._publishedMetadata = fs.existsSync(outFile) ? existingMetadata : null;
       page._published = !!page._publishedMetadata;
@@ -491,22 +609,28 @@ function collectKnowledgeEvidence(repoDir, scan) {
   await runPool(landingPages); // then section landing pages that link them
 
   // --- Remove stale pages (dropped from the plan since the last run) ---
-  const previouslyManagedPaths = new Set([
-    ...Object.keys(state.pages),
-    ...Object.keys(state.pageMetadata),
-  ]);
-  for (const rel of previouslyManagedPaths) {
-    if (!currentPaths.has(rel)) {
-      const managed = safeManagedPath(outDir, rel);
-      if (managed && fs.existsSync(managed.full)) {
-        const stat = fs.lstatSync(managed.full);
-        if (stat.isFile() || stat.isSymbolicLink()) {
-          fs.unlinkSync(managed.full);
-          console.log(`  removed stale: ${managed.rel}`);
+  // Skipped entirely when this run had page failures: a failed replacement
+  // page must never cause deletion of its still-good predecessor.
+  if (failed > 0) {
+    console.log(`  stale cleanup skipped (${failed} page failure${failed === 1 ? '' : 's'})`);
+  } else {
+    const previouslyManagedPaths = new Set([
+      ...Object.keys(state.pages),
+      ...Object.keys(state.pageMetadata),
+    ]);
+    for (const rel of previouslyManagedPaths) {
+      if (!currentPaths.has(rel)) {
+        const managed = safeManagedPath(outDir, rel);
+        if (managed && fs.existsSync(managed.full)) {
+          const stat = fs.lstatSync(managed.full);
+          if (stat.isFile() || stat.isSymbolicLink()) {
+            fs.unlinkSync(managed.full);
+            console.log(`  removed stale: ${managed.rel}`);
+          }
         }
+        delete state.pages[rel];
+        delete state.pageMetadata[rel];
       }
-      delete state.pages[rel];
-      delete state.pageMetadata[rel];
     }
   }
   // prune now-empty subdirectories
@@ -557,6 +681,7 @@ function collectKnowledgeEvidence(repoDir, scan) {
         dependent_files: metadata.dependent_files,
         parent: parentByChild.get(metadata.path) || null,
         isLanding: metadata.isLanding,
+        quality: metadata.quality || 'ok',
       };
     }),
   };
@@ -711,7 +836,7 @@ function collectKnowledgeEvidence(repoDir, scan) {
   }
 
   console.log(
-    `\nDone: ${ok} generated, ${skipped} skipped, `
+    `\nDone: ${ok} generated, ${degraded} degraded, ${skipped} skipped, `
     + `${failed} page failures, ${knowledgeFailed} knowledge failures -> ${outDir}`
   );
   console.log(`Tip: export to PDF with  node ${path.join(__dirname, 'export.js')} ${outDir} ${path.join(repoDir, 'wiki-pdf')}`);

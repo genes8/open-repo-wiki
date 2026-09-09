@@ -43,13 +43,15 @@ const DEFAULT_PLAN = {
 };
 
 function extractTitle(userMessage) {
-  const match = userMessage.match(/Write the wiki page "([^"]+)"/);
+  // Matches both the authoring prompt ('Write the wiki page "X"') and the
+  // minimal-edit repair prompt ('The draft below for the wiki page "X" ...').
+  const match = userMessage.match(/wiki page "([^"]+)"/);
   return match ? match[1] : 'Page';
 }
 
 function extractChildLinks(userMessage) {
   const block = userMessage.match(
-    /Include every child using these exact links:\n((?:- \[[^\n]+\]\([^)]+\)\n?)+)/
+    /(?:Include every child using these exact links|Keep these exact child links):\n((?:- \[[^\n]+\]\([^)]+\)\n?)+)/
   );
   return block ? block[1].trim() : '';
 }
@@ -59,7 +61,7 @@ function defaultPageResponse({ title, userMessage }) {
   const range = userMessage.match(
     /- \[[^\]]+:L\d+-L\d+\]\([^)]+#L\d+-L\d+\)/
   );
-  const depth = userMessage.match(/Write (\d+)-(\d+) H2 sections and (\d+)-(\d+) words/);
+  const depth = userMessage.match(/(\d+)-(\d+) H2 sections and (\d+)-(\d+) words/);
   const sectionCount = depth ? Number(depth[1]) : 4;
   const minimumWords = depth ? Number(depth[3]) : 300;
   const wordsPerSection = Math.ceil(minimumWords / sectionCount);
@@ -150,7 +152,7 @@ function createMockServer({
           });
         } else {
           const title = extractTitle(userMessage);
-          const isRepair = /repairing a rejected draft/i.test(systemMessage);
+          const isRepair = /repairing a rejected/i.test(systemMessage);
           state.pageRequests++;
           if (isRepair) state.repairRequests++;
           state.byTitle[title] = (state.byTitle[title] || 0) + 1;

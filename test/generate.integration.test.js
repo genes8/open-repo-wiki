@@ -105,6 +105,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   const behavior = {
     rejectedOverview: false,
     alwaysFailTitle: null,
+    thinTitle: null,
   };
   const refusal = [
     '# Refused',
@@ -116,6 +117,16 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     plan,
     pageResponder: context => {
       if (behavior.alwaysFailTitle === context.title) return refusal;
+      if (behavior.thinTitle === context.title) {
+        // Structurally sound (one H1, cite block, balanced fences) but far too
+        // thin — fails word/section gates on every attempt without refusing.
+        const cite = context.userMessage.match(/<cite>[\s\S]*?<\/cite>/);
+        return [
+          `# ${context.title}`,
+          cite ? cite[0] : '',
+          '## Only\n\nToo few grounded words.',
+        ].filter(Boolean).join('\n\n');
+      }
       if (context.title === 'Project Overview'
         && !context.isRepair
         && !behavior.rejectedOverview) {
@@ -136,7 +147,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   writeJson(configPath, {
     default: 'mock',
     language: 'en',
-    maxPages: 5,
+    maxPages: 8,
     template: 'standard',
     models: {
       mock: {
@@ -356,6 +367,107 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   plan.pages.pop();
   behavior.alwaysFailTitle = null;
 
+  plan.pages.push({
+    path: 'guides/thin.md',
+    title: 'Thin',
+    description: 'A page whose drafts stay structurally sound but too thin.',
+    files: ['README.md'],
+  });
+  behavior.thinTitle = 'Thin';
+  const degradedRun = await runGenerator(repo, configPath);
+  assert.equal(degradedRun.code, 0, `${degradedRun.stderr}\n${degradedRun.stdout}`);
+  assert.match(degradedRun.stdout, /WARN {2}guides\/thin\.md: published degraded after 3 attempts/);
+  assert.match(degradedRun.stdout, /1 degraded/);
+  const thinMarkdown = fs.readFileSync(path.join(contentDir, 'guides/thin.md'), 'utf8');
+  assert.match(thinMarkdown, /^# Thin/m);
+  const degradedCatalog = JSON.parse(
+    fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
+  );
+  const thinEntry = degradedCatalog.pages.find(page => page.path === 'guides/thin.md');
+  assert.equal(thinEntry.quality, 'degraded');
+  assert.equal(thinEntry.parent, 'guides/guides.md');
+  assert.equal(
+    degradedCatalog.pages.find(page => page.path === 'overview.md').quality,
+    'ok'
+  );
+  assert.match(
+    fs.readFileSync(path.join(contentDir, 'index.md'), 'utf8'),
+    /^ {2}- \[Thin]\(guides\/thin\.md\)$/m
+  );
+  // Degraded pages carry no content hash, so the next run retries them.
+  const thinCallsAfterFirstPublish = server.state.byTitle.Thin;
+  const degradedRetry = await runGenerator(repo, configPath);
+  assert.equal(degradedRetry.code, 0, `${degradedRetry.stderr}\n${degradedRetry.stdout}`);
+  assert.equal(server.state.byTitle.Thin, thinCallsAfterFirstPublish + 3);
+  behavior.thinTitle = null;
+  const healedThin = await runGenerator(repo, configPath);
+  assert.equal(healedThin.code, 0, `${healedThin.stderr}\n${healedThin.stdout}`);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8'))
+      .pages.find(page => page.path === 'guides/thin.md').quality,
+    'ok'
+  );
+  plan.pages.pop();
+  const removeThin = await runGenerator(repo, configPath);
+  assert.equal(removeThin.code, 0, `${removeThin.stderr}\n${removeThin.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/thin.md')), false);
+
+  // A landing publishes fail-soft with only its successful children; the
+  // failed child alone drives the non-zero exit code.
+  plan.pages.push(
+    {
+      path: 'ref/cli.md',
+      title: 'CLI',
+      description: 'Command line reference.',
+      files: ['README.md'],
+    },
+    {
+      path: 'ref/api.md',
+      title: 'API',
+      description: 'API reference.',
+      files: ['README.md'],
+    }
+  );
+  behavior.alwaysFailTitle = 'API';
+  const partialSection = await runGenerator(repo, configPath);
+  assert.equal(partialSection.code, 1, `${partialSection.stderr}\n${partialSection.stdout}`);
+  assert.match(
+    partialSection.stdout,
+    /note {2}ref\/ref\.md: landing published without unpublished child\(ren\): ref\/api\.md/
+  );
+  const refLanding = fs.readFileSync(path.join(contentDir, 'ref/ref.md'), 'utf8');
+  assert.match(refLanding, /\[CLI\]\(cli\.md\)/);
+  assert.doesNotMatch(refLanding, /api\.md/);
+  const partialCatalog = JSON.parse(
+    fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
+  );
+  assert.equal(
+    partialCatalog.pages.find(page => page.path === 'ref/cli.md').parent,
+    'ref/ref.md'
+  );
+  assert.equal(partialCatalog.pages.some(page => page.path === 'ref/api.md'), false);
+  behavior.alwaysFailTitle = null;
+  plan.pages.pop();
+  plan.pages.pop();
+  const removeRef = await runGenerator(repo, configPath);
+  assert.equal(removeRef.code, 0, `${removeRef.stderr}\n${removeRef.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'ref')), false);
+
+  // A path rename whose replacement page fails must not delete the still-good
+  // old page: stale cleanup is skipped on runs with page failures.
+  startPlan.path = 'guides/begin.md';
+  behavior.alwaysFailTitle = 'Start';
+  const renamedFail = await runGenerator(repo, configPath);
+  assert.equal(renamedFail.code, 1, `${renamedFail.stderr}\n${renamedFail.stdout}`);
+  assert.match(renamedFail.stdout, /stale cleanup skipped \(1 page failure\)/);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/start.md')), true);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/begin.md')), false);
+  startPlan.path = 'guides/start.md';
+  behavior.alwaysFailTitle = null;
+  const revertRename = await runGenerator(repo, configPath);
+  assert.equal(revertRename.code, 0, `${revertRename.stderr}\n${revertRename.stdout}`);
+  assert.match(revertRename.stdout, /SKIP {2}guides\/start\.md/);
+
   const protectedPage = path.join(contentDir, 'guides/start.md');
   const lastKnownGood = fs.readFileSync(protectedPage);
   fs.appendFileSync(path.join(repo, 'lib/b.js'), '// changed source\n');
@@ -377,4 +489,15 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   assert.equal(unchanged.code, 0, `${unchanged.stderr}\n${unchanged.stdout}`);
   const skipped = unchanged.stdout.match(/\bSKIP\b/g) || [];
   assert.equal(skipped.length, catalog.pages.length, unchanged.stdout);
+
+  // A custom --out that is not a .../content dir keeps the meta and knowledge
+  // trees contained inside the chosen output dir instead of escaping it.
+  const flatOut = path.join(repo, 'flat-out');
+  const contained = await runGenerator(repo, configPath, ['--out', flatOut]);
+  assert.equal(contained.code, 0, `${contained.stderr}\n${contained.stdout}`);
+  assert.equal(fs.existsSync(path.join(flatOut, '.meta/catalog.json')), true);
+  assert.equal(fs.existsSync(path.join(flatOut, '.knowledge/en/_index.yaml')), true);
+  assert.equal(fs.existsSync(path.join(flatOut, 'index.md')), true);
+  assert.equal(fs.existsSync(path.join(repo, 'meta')), false);
+  assert.equal(fs.existsSync(path.join(repo, 'flat-out.meta')), false);
 });

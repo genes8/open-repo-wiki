@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pageMessages, repairPageMessages } = require('../lib/prompts');
+const { planMessages, pageMessages, repairPageMessages } = require('../lib/prompts');
 const { PAGE_PROFILES } = require('../lib/quality');
 
 const scan = {
@@ -23,6 +23,29 @@ const opts = {
   profile: PAGE_PROFILES.architecture,
 };
 
+test('planMessages scales the page floor and anchors on prior published pages', () => {
+  const planScan = { ...scan, keyFiles: {}, langStats: 'js: 2 files' };
+  const anchored = planMessages(planScan, {
+    maxPages: 20,
+    minPages: 9,
+    priorPages: [
+      { path: 'overview.md', title: 'Project Overview' },
+      { path: 'guides/start.md', title: 'Start' },
+    ],
+  }).map(message => message.content).join('\n');
+
+  assert.match(anchored, /Between 9 and 20 pages/);
+  assert.match(anchored, /already published with these pages/);
+  assert.match(anchored, /- overview\.md \("Project Overview"\)/);
+  assert.match(anchored, /- guides\/start\.md \("Start"\)/);
+  assert.match(anchored, /Reuse the exact same "path" and "title"/);
+
+  const fresh = planMessages(planScan, { maxPages: 20 })
+    .map(message => message.content).join('\n');
+  assert.match(fresh, /Between 4 and 20 pages/);
+  assert.doesNotMatch(fresh, /already published with these pages/);
+});
+
 test('pageMessages includes bounded depth and grounded range citation rules', () => {
   const messages = pageMessages(scan, page, filesBlock, opts);
   const prompt = messages.map(message => message.content).join('\n');
@@ -38,7 +61,7 @@ test('pageMessages includes bounded depth and grounded range citation rules', ()
   assert.match(prompt, /never guess or exceed numbered source lines/i);
 });
 
-test('repairPageMessages requests a complete replacement with stable violations', () => {
+test('repairPageMessages frames a minimal edit against the rejected draft', () => {
   const rejected = '# Data Flow\n\nI apologize.';
   const violations = [
     { code: 'refusal_text', message: 'page contains refusal text' },
@@ -54,12 +77,19 @@ test('repairPageMessages requests a complete replacement with stable violations'
   );
   const prompt = messages.map(message => message.content).join('\n');
 
+  assert.match(messages[0].content, /repairing a rejected/i);
+  assert.match(messages[0].content, /smallest edit/i);
   assert.match(prompt, /# Data Flow\n\nI apologize\./);
   assert.match(prompt, /refusal_text: page contains refusal text/);
   assert.match(prompt, /word_count: found 3 words/);
-  assert.match(prompt, /complete replacement document/i);
+  assert.match(prompt, /fix ONLY these/i);
+  assert.match(prompt, /4-8 H2 sections and 300-1600 words/);
+  assert.match(prompt, /- \[lib\/a\.js\]\(lib\/a\.js\)/);
+  assert.match(prompt, /lib\/a\.js \(lines 1-8\)/);
   assert.match(prompt, /L1: one\nL2: two/);
-  assert.match(prompt, /Explain the real data flow\./);
+  assert.match(prompt, /complete corrected Markdown document/i);
+  // The full authoring prompt must NOT be replayed around the draft.
+  assert.doesNotMatch(prompt, /Write the wiki page/);
 });
 
 test('landing prompt includes exact final child links', () => {
