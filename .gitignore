@@ -8,6 +8,9 @@ wiki-pdf/
 # test artifacts
 test/fixture-repo/
 
+# secrets — API keys live here, never in config.json (which only names env vars)
+.env
+
 # editor / tooling output
 .qoder/
 
