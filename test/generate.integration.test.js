@@ -169,6 +169,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     planSequence: null,
     finishReasonTitle: null,
     providerErrorTitle: null,
+    thinTitle: null,
   };
   const refusal = [
     '# Refused',
@@ -187,6 +188,16 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
         throw new Error(`forced provider failure for ${context.title}`);
       }
       if (behavior.alwaysFailTitle === context.title) return refusal;
+      if (behavior.thinTitle === context.title) {
+        // Structurally sound (one H1, cite block, balanced fences) but far too
+        // thin — fails word/section gates on every attempt without refusing.
+        const cite = context.userMessage.match(/<cite>[\s\S]*?<\/cite>/);
+        return [
+          `# ${context.title}`,
+          cite ? cite[0] : '',
+          '## Only\n\nToo few grounded words.',
+        ].filter(Boolean).join('\n\n');
+      }
       if (context.title === 'Project Overview'
         && !context.isRepair
         && !behavior.rejectedOverview) {
@@ -215,7 +226,7 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   const mockConfig = {
     default: 'mock',
     language: 'en',
-    maxPages: 5,
+    maxPages: 8,
     template: 'standard',
     models: {
       mock: {
@@ -572,6 +583,115 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
   assert.doesNotMatch(fs.readFileSync(landingPath, 'utf8'), /Broken|broken\.md/);
   plan.pages.pop();
   behavior.alwaysFailTitle = null;
+
+  plan.pages.push({
+    path: 'guides/thin.md',
+    title: 'Thin',
+    description: 'A page whose drafts stay structurally sound but too thin.',
+    files: ['README.md'],
+  });
+  behavior.thinTitle = 'Thin';
+  const degradedRun = await runGenerator(repo, configPath);
+  assert.equal(degradedRun.code, 0, `${degradedRun.stderr}\n${degradedRun.stdout}`);
+  assert.match(degradedRun.stdout, /WARN {2}guides\/thin\.md: published degraded after 3 attempts/);
+  assert.match(degradedRun.stdout, /1 degraded/);
+  const thinMarkdown = fs.readFileSync(path.join(contentDir, 'guides/thin.md'), 'utf8');
+  assert.match(thinMarkdown, /^# Thin/m);
+  const degradedCatalog = JSON.parse(
+    fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8')
+  );
+  const thinEntry = degradedCatalog.pages.find(page => page.path === 'guides/thin.md');
+  assert.equal(thinEntry.quality, 'degraded');
+  assert.equal(thinEntry.parent, 'guides/guides.md');
+  assert.equal(
+    degradedCatalog.pages.find(page => page.path === 'overview.md').quality,
+    'ok'
+  );
+  assert.match(
+    fs.readFileSync(path.join(contentDir, 'index.md'), 'utf8'),
+    /^ {2}- \[Thin]\(guides\/thin\.md\)$/m
+  );
+  // Degraded pages carry no content hash, so the next run retries them.
+  const thinCallsAfterFirstPublish = server.state.byTitle.Thin;
+  const degradedRetry = await runGenerator(repo, configPath);
+  assert.equal(degradedRetry.code, 0, `${degradedRetry.stderr}\n${degradedRetry.stdout}`);
+  assert.equal(server.state.byTitle.Thin, thinCallsAfterFirstPublish + 3);
+  behavior.thinTitle = null;
+  const healedThin = await runGenerator(repo, configPath);
+  assert.equal(healedThin.code, 0, `${healedThin.stderr}\n${healedThin.stdout}`);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(metaDir, 'catalog.json'), 'utf8'))
+      .pages.find(page => page.path === 'guides/thin.md').quality,
+    'ok'
+  );
+  plan.pages.pop();
+  const removeThin = await runGenerator(repo, configPath);
+  assert.equal(removeThin.code, 0, `${removeThin.stderr}\n${removeThin.stdout}`);
+  // Dropping a page from the plan keeps it live (and in the catalog) until an
+  // explicit --prune, matching the transactional model's opt-in stale cleanup.
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/thin.md')), true);
+  const pruneThin = await runGenerator(repo, configPath, ['--prune']);
+  assert.equal(pruneThin.code, 0, `${pruneThin.stderr}\n${pruneThin.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/thin.md')), false);
+
+  // The base plan plus a new ref/ section (two children + landing) needs more
+  // headroom than the maxPages=5 used by the plan-regression cases above, or
+  // normalizePlan truncates ref/ to a singleton directory and the plan is
+  // rejected before any page is generated.
+  mockConfig.maxPages = 8;
+  writeJson(configPath, mockConfig);
+  // A landing stages with only its successful children and emits a note, but
+  // the failed child aborts the whole transaction: nothing partial lands live.
+  plan.pages.push(
+    {
+      path: 'ref/cli.md',
+      title: 'CLI',
+      description: 'Command line reference.',
+      files: ['README.md'],
+    },
+    {
+      path: 'ref/api.md',
+      title: 'API',
+      description: 'API reference.',
+      files: ['README.md'],
+    }
+  );
+  behavior.alwaysFailTitle = 'API';
+  const beforePartialSection = snapshotWiki(repo);
+  const partialSection = await runGenerator(repo, configPath);
+  assert.equal(partialSection.code, 1, `${partialSection.stderr}\n${partialSection.stdout}`);
+  assert.match(
+    partialSection.stdout,
+    /note {2}ref\/ref\.md: landing published without unpublished child\(ren\): ref\/api\.md/
+  );
+  // The failed child aborts the whole transaction, so neither the landing nor
+  // its successful sibling reaches the live wiki (all-or-nothing beats a
+  // partial section).
+  assert.deepEqual(snapshotWiki(repo), beforePartialSection);
+  assert.equal(fs.existsSync(path.join(contentDir, 'ref')), false);
+  behavior.alwaysFailTitle = null;
+  plan.pages.pop();
+  plan.pages.pop();
+  mockConfig.maxPages = 5;
+  writeJson(configPath, mockConfig);
+  const removeRef = await runGenerator(repo, configPath);
+  assert.equal(removeRef.code, 0, `${removeRef.stderr}\n${removeRef.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'ref')), false);
+
+  // A path rename whose replacement page fails must not delete the still-good
+  // old page: the failure aborts the transaction, leaving the live wiki (and
+  // the old start.md) untouched.
+  startPlan.path = 'guides/begin.md';
+  behavior.alwaysFailTitle = 'Start';
+  const renamedFail = await runGenerator(repo, configPath);
+  assert.equal(renamedFail.code, 1, `${renamedFail.stderr}\n${renamedFail.stdout}`);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/start.md')), true);
+  assert.equal(fs.existsSync(path.join(contentDir, 'guides/begin.md')), false);
+  startPlan.path = 'guides/start.md';
+  behavior.alwaysFailTitle = null;
+  const revertRename = await runGenerator(repo, configPath);
+  assert.equal(revertRename.code, 0, `${revertRename.stderr}\n${revertRename.stdout}`);
+  assert.match(revertRename.stdout, /SKIP {2}guides\/start\.md/);
 
   const protectedPage = path.join(contentDir, 'guides/start.md');
   const lastKnownGood = fs.readFileSync(protectedPage);

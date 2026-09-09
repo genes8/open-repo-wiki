@@ -39,6 +39,9 @@ if (!fs.existsSync(SRC)) {
 function walk(dir) {
   const files = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    // Dot-dirs hold generator machinery (.meta catalog, .knowledge cards with
+    // their own .md files) and must never be exported as wiki pages.
+    if (entry.name.startsWith('.')) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) files.push(...walk(full));
     else if (entry.name.endsWith('.md')) files.push(full);
@@ -275,7 +278,14 @@ table{width:100%;border-collapse:collapse;font-size:12px}</style></head>
   // fall back to a flat list (e.g. when exporting a Qoder repowiki that has none).
   let navHtml;
   let catalog = null;
-  try { catalog = JSON.parse(fs.readFileSync(path.join(SRC, '..', 'meta', 'catalog.json'), 'utf8')); } catch { /* no catalog */ }
+  // Standard layout keeps the catalog at <SRC>/../meta; a custom generator
+  // --out keeps it contained inside the content dir at <SRC>/.meta.
+  for (const candidate of [
+    path.join(SRC, '..', 'meta', 'catalog.json'),
+    path.join(SRC, '.meta', 'catalog.json'),
+  ]) {
+    try { catalog = JSON.parse(fs.readFileSync(candidate, 'utf8')); break; } catch { /* try next */ }
+  }
   if (catalog && Array.isArray(catalog.pages)) {
     const pages = catalog.pages.filter(p => p.path && p.path !== 'index.md');
     const byDir = new Map();

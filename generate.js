@@ -106,6 +106,37 @@ function parseArgs(argv) {
   return args;
 }
 
+// Zero-dependency .env loader. Reads KEY=VALUE lines from <repoDir>/.env then
+// <appDir>/.env into process.env WITHOUT overriding vars already set in the real
+// environment (real env always wins). Keeps secrets out of the committed config:
+// config.json only references env var NAMES ("env:ZHIPU_API_KEY"), the values
+// live in an untracked .env file. Supports optional `export ` prefix, # comments,
+// and single/double quoted values.
+function loadDotenv(repoDir) {
+  const files = [path.join(repoDir, '.env'), path.join(__dirname, '.env')];
+  let loaded = 0;
+  for (const file of files) {
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    for (const rawLine of text.split(/\r?\n/)) {
+      let line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      if (line.startsWith('export ')) line = line.slice(7).trim();
+      const eq = line.indexOf('=');
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      if (!key || Object.prototype.hasOwnProperty.call(process.env, key)) continue;
+      let val = line.slice(eq + 1).trim();
+      if (val.length >= 2 && ((val[0] === '"' && val.endsWith('"')) || (val[0] === "'" && val.endsWith("'")))) {
+        val = val.slice(1, -1);
+      }
+      process.env[key] = val;
+      loaded++;
+    }
+  }
+  if (loaded) console.log(`  loaded .env (${loaded} var${loaded === 1 ? '' : 's'})`);
+}
+
 function loadConfig(args, repoDir) {
   const candidates = [
     args.config,
@@ -201,6 +232,7 @@ function normalizePublishedMetadata(value, fallbackPath = '') {
         .filter(Boolean)
     )],
     isLanding: value.isLanding === true,
+    quality: value.quality === 'degraded' ? 'degraded' : 'ok',
     child_paths: [...new Set(
       (Array.isArray(value.child_paths) ? value.child_paths : [])
         .map(child => canonicalRelativePath(child, { markdown: true }))
@@ -239,6 +271,7 @@ function snapshotPageMetadata(page, attached) {
     description: page._desc0 || page.description || '',
     dependent_files: [...attached],
     isLanding: !!page._landing,
+    quality: 'ok',
     child_paths: (page._children || []).map(child => child.path),
   };
 }
@@ -312,6 +345,10 @@ let publicationCommitted = false;
     process.exit(1);
   }
   const repoDir = fs.realpathSync(requestedRepoDir);
+  // Populate process.env from an untracked .env before any provider key is
+  // resolved, so config.json can reference secrets by name ("env:ZHIPU_API_KEY")
+  // without committing their values.
+  loadDotenv(repoDir);
 
   const { config, configPath } = loadConfig(args, repoDir);
   if (args.listModels) { listModels(config); process.exit(0); }
@@ -374,6 +411,15 @@ let publicationCommitted = false;
   const previousPages = previousPlanFromState(state, {
     pages: [...priorMetadataByPath.values()],
   });
+  // Empirical floor scaled to repository size, plus anchoring on previously
+  // published pages, so one weak planner response cannot collapse the wiki or
+  // churn stable paths/titles across runs. Prompt-level guidance only; the
+  // deterministic regression gate (validatePlanQuality) stays authoritative.
+  const minPages = Math.min(
+    maxPages,
+    Math.max(4, parseInt(config.minPages, 10) || Math.ceil(scan.files.length / 3))
+  );
+  const priorPages = previousPages.map(p => ({ path: p.path, title: p.title }));
 
   const runId = newRunId();
   const diagnostics = createRunDiagnostics(runsDir, {
@@ -399,13 +445,13 @@ let publicationCommitted = false;
   let planViolations = [];
   for (let attempt = 1; attempt <= 3; attempt++) {
     const messages = attempt === 1
-      ? planMessages(scan, { maxPages })
+      ? planMessages(scan, { maxPages, minPages, priorPages })
       : repairPlanMessages(
         scan,
         previousPages,
         rejectedPlan,
         planViolations,
-        { maxPages }
+        { maxPages, minPages, priorPages }
       );
     let completion = null;
     let candidate = null;
@@ -508,7 +554,7 @@ let publicationCommitted = false;
     || profile.concurrency || config.concurrency || 1);
   if (concurrency > 1) console.log(`  concurrency: ${concurrency}`);
 
-  let ok = 0, skipped = 0, failed = 0;
+  let ok = 0, skipped = 0, degraded = 0, failed = 0;
   const currentPaths = new Set(pages.map(p => p.path));
 
   const mainPages = pages.filter(p => !p._landing);
@@ -581,14 +627,23 @@ let publicationCommitted = false;
       return;
     }
     if (page._landing) {
-      const missing = (page._children || []).filter(child => !child._published);
-      if (missing.length) {
+      const children = page._children || [];
+      const missing = children.filter(child => !child._published);
+      // Fail-soft: a landing renders whatever children DID publish. Only when
+      // no child made it is there nothing to link, so the landing fails.
+      if (missing.length && missing.length === children.length) {
         failed++;
         console.log(
-          `  FAIL  ${page.path}: unpublished child page(s): `
+          `  FAIL  ${page.path}: no published child page(s): `
           + missing.map(child => child.path).join(', ')
         );
         return;
+      }
+      if (missing.length) {
+        console.log(
+          `  note  ${page.path}: landing published without unpublished child(ren): `
+          + missing.map(child => child.path).join(', ')
+        );
       }
     }
     try {
@@ -603,6 +658,10 @@ let publicationCommitted = false;
       let rejected = '';
       let validation;
       let md = '';
+      // Best-of across attempts: repair rounds can regress with small models,
+      // so keep the least-broken structurally sound draft as a fail-soft
+      // fallback instead of always judging the (possibly worst) last attempt.
+      let best = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         const messages = attempt === 0
           ? pageMessages(scan, generationPage, block, promptOptions)
@@ -661,26 +720,62 @@ let publicationCommitted = false;
           stats: validation.stats,
           accepted: validation.ok,
         });
+        if (citationResult.repaired) {
+          console.log(
+            `  note  ${page.path}: repaired ${citationResult.repaired} citation range(s)`
+          );
+        }
         if (citationResult.dropped) {
           console.log(
             `  note  ${page.path}: dropped ${citationResult.dropped} invalid citation item(s)`
           );
         }
         if (validation.ok) break;
-        const codes = [...new Set(validation.violations.map(item => item.code))].join(',');
+        const codes = [...new Set(validation.violations.map(item => item.code))];
+        // A draft qualifies for degraded publishing only when its skeleton is
+        // sound AND its generation actually finished: real content, single H1,
+        // balanced fences, no refusal, and not a truncated completion. A
+        // truncated completion is incomplete output (the provider stopped mid
+        // page), so — unlike a complete-but-thin draft — it aborts the run
+        // rather than landing half-finished prose.
+        const publishable = md.trim().length > 0
+          && !codes.includes('refusal_text')
+          && !codes.includes('h1_count')
+          && !codes.includes('unbalanced_fence')
+          && !codes.includes('completion_truncated');
+        if (publishable && (!best || validation.violations.length < best.violations.length)) {
+          best = { md, violations: validation.violations };
+        }
         if (attempt < 2) {
-          console.log(`  REPAIR ${page.path} attempt ${attempt + 1}/2 (${codes})`);
-        } else {
-          throw new Error(`quality validation failed after 3 attempts (${codes})`);
+          console.log(`  REPAIR ${page.path} attempt ${attempt + 1}/2 (${codes.join(',')})`);
         }
       }
-      atomicWrite(outFile, `${md.trim()}\n`);
-      page._publishedMetadata = currentMetadata;
-      page._published = true;
-      state.pages[page.path] = hash;
-      state.pageMetadata[page.path] = currentMetadata;
-      ok++;
-      console.log(`  OK    ${page.path} (${md.length} chars, ${attached.length} source files)`);
+      if (validation.ok) {
+        atomicWrite(outFile, `${md.trim()}\n`);
+        page._publishedMetadata = currentMetadata;
+        page._published = true;
+        state.pages[page.path] = hash;
+        state.pageMetadata[page.path] = currentMetadata;
+        saveState();
+        ok++;
+        console.log(`  OK    ${page.path} (${md.length} chars, ${attached.length} source files)`);
+      } else if (best) {
+        // Fail-soft: an imperfect page beats a hole in the wiki. Publish the
+        // best draft, flag it, and leave it hash-less so the next run retries.
+        const codes = [...new Set(best.violations.map(item => item.code))].join(',');
+        const degradedMetadata = { ...currentMetadata, quality: 'degraded' };
+        atomicWrite(outFile, `${best.md.trim()}\n`);
+        page._publishedMetadata = degradedMetadata;
+        page._published = true;
+        delete state.pages[page.path];
+        state.pageMetadata[page.path] = degradedMetadata;
+        saveState();
+        degraded++;
+        console.log(`  WARN  ${page.path}: published degraded after 3 attempts (${codes})`);
+      } else {
+        const codes = [...new Set(validation.violations.map(item => item.code))].join(',');
+        throw new Error(`quality validation failed after 3 attempts (${codes})`);
+      }
     } catch (err) {
       page._publishedMetadata = fs.existsSync(outFile) ? existingMetadata : null;
       page._published = !!page._publishedMetadata;
@@ -727,9 +822,9 @@ let publicationCommitted = false;
           fs.unlinkSync(managed.full);
           console.log(`  removed stale: ${managed.rel}`);
         }
+        delete state.pages[rel];
+        delete state.pageMetadata[rel];
       }
-      delete state.pages[rel];
-      delete state.pageMetadata[rel];
     }
   }
   if (deleteStale) pruneEmptyDirectories(outDir);
@@ -783,6 +878,7 @@ let publicationCommitted = false;
         dependent_files: metadata.dependent_files,
         parent: parentByChild.get(metadata.path) || null,
         isLanding: metadata.isLanding,
+        quality: metadata.quality || 'ok',
       };
     }),
   };
@@ -1020,7 +1116,7 @@ let publicationCommitted = false;
   activeDiagnostics = null;
 
   console.log(
-    `\nDone: ${ok} generated, ${skipped} skipped, `
+    `\nDone: ${ok} generated, ${degraded} degraded, ${skipped} skipped, `
     + `${failed} page failures, ${knowledgeFailed} knowledge failures -> ${liveOutDir}`
   );
   console.log(`Tip: export to PDF with  node ${path.join(__dirname, 'export.js')} ${liveOutDir} ${path.join(repoDir, 'wiki-pdf')}`);
