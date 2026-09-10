@@ -318,6 +318,15 @@ test('generator repairs, grounds, preserves last good pages, and skips unchanged
     true
   );
 
+  // Coverage guarantee: every source-code file in the repository is attached to
+  // at least one page, so no module is silently left undocumented. The plan only
+  // listed lib/a.js; lib/b.js must have been attached by ensureFileCoverage.
+  const scopedFiles = new Set(catalog.pages.flatMap(page => page.dependent_files || []));
+  assert.ok(
+    scopedFiles.has('lib/a.js') && scopedFiles.has('lib/b.js'),
+    `expected full source coverage, got: ${[...scopedFiles].sort().join(', ')}`
+  );
+
   for (const catalogPage of catalog.pages) {
     const markdown = fs.readFileSync(path.join(contentDir, catalogPage.path), 'utf8');
     const targets = [...markdown.matchAll(/\]\(([^)]+#L\d+-L\d+)\)/g)]

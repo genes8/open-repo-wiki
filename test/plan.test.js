@@ -2,7 +2,13 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizePlan, dirOf, groupPages } = require('../lib/plan');
+const {
+  normalizePlan,
+  dirOf,
+  groupPages,
+  coverageReport,
+  ensureFileCoverage,
+} = require('../lib/plan');
 
 const scan = {
   fileSet: new Set(['README.md', 'lib/a.js', 'lib/b.js', 'config.json']),
@@ -74,4 +80,49 @@ test('groupPages returns stable directory groups', () => {
   const pages = [{ path: 'overview.md' }, { path: 'guides/a.md' }, { path: 'guides/b.md' }];
   assert.equal(dirOf('guides/a.md'), 'guides');
   assert.deepEqual([...groupPages(pages).keys()], ['', 'guides']);
+});
+
+test('coverageReport lists source files absent from every page scope', () => {
+  const report = coverageReport([
+    { path: 'overview.md', files: ['README.md', 'lib/a.js'] },
+  ], scan);
+  // Only code files are coverable: lib/a.js and lib/b.js (not README.md/config.json).
+  assert.deepEqual(report.coverable, ['lib/a.js', 'lib/b.js']);
+  assert.deepEqual(report.uncovered, ['lib/b.js']);
+  assert.equal(report.total, 2);
+  assert.equal(report.coveredCount, 1);
+});
+
+test('ensureFileCoverage assigns uncovered files to the closest page by directory', () => {
+  const pages = [
+    { path: 'overview.md', files: ['README.md'] },
+    { path: 'architecture/modules.md', files: ['lib/a.js'] },
+  ];
+  const { assigned } = ensureFileCoverage(pages, scan);
+  // lib/b.js shares the 'lib' directory with lib/a.js, so it lands on modules.md.
+  assert.deepEqual(pages.find(p => p.path === 'architecture/modules.md').files, ['lib/a.js', 'lib/b.js']);
+  // overview.md is untouched; assignment is append-only.
+  assert.deepEqual(pages.find(p => p.path === 'overview.md').files, ['README.md']);
+  assert.deepEqual(assigned, [{ file: 'lib/b.js', page: 'architecture/modules.md' }]);
+  assert.equal(coverageReport(pages, scan).uncovered.length, 0);
+});
+
+test('ensureFileCoverage is idempotent and never reorders existing files', () => {
+  const pages = [{ path: 'overview.md', files: ['lib/a.js'] }];
+  ensureFileCoverage(pages, scan);
+  const afterFirst = pages[0].files.slice();
+  ensureFileCoverage(pages, scan);
+  assert.deepEqual(afterFirst, ['lib/a.js', 'lib/b.js']);
+  assert.deepEqual(pages[0].files, afterFirst);
+});
+
+test('normalizePlan applies coverage only when ensureCoverage is set', () => {
+  const raw = [{ path: 'overview.md', title: 'Overview', files: ['README.md', 'lib/a.js'] }];
+  const off = normalizePlan(raw, scan, { maxPages: 5 });
+  assert.deepEqual(off.pages[0].files, ['README.md', 'lib/a.js']);
+  assert.equal(off.coverage, undefined);
+
+  const on = normalizePlan(raw, scan, { maxPages: 5, ensureCoverage: true });
+  assert.deepEqual(on.pages[0].files, ['README.md', 'lib/a.js', 'lib/b.js']);
+  assert.deepEqual(on.coverage.assigned, [{ file: 'lib/b.js', page: 'overview.md' }]);
 });

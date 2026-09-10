@@ -467,7 +467,10 @@ let publicationCommitted = false;
       );
       rejectedPlan = completion.content;
       const parsed = extractJson(rejectedPlan);
-      candidate = normalizePlan(parsed.pages, scan, { maxPages });
+      candidate = normalizePlan(parsed.pages, scan, {
+        maxPages,
+        ensureCoverage: config.ensureCoverage !== false,
+      });
       if (completionWasTruncated(completion.finishReason)) {
         planViolations.push({
           code: 'plan_completion_truncated',
@@ -477,7 +480,10 @@ let publicationCommitted = false;
       planViolations.push(...validatePlanQuality(
         candidate.pages,
         previousPages,
-        { acceptPlanShrink: !!args.acceptPlanShrink }
+        {
+          acceptPlanShrink: !!args.acceptPlanShrink,
+          scan: config.ensureCoverage !== false ? scan : null,
+        }
       ).violations);
     } catch (error) {
       planViolations.push({
@@ -516,6 +522,11 @@ let publicationCommitted = false;
   diagnostics.acceptPlan(planSnapshot(pages));
   console.log(`  ${pages.length} pages planned:`);
   for (const p of pages) console.log(`    - ${p.path}  (${p.title})`);
+  if (normalized.coverage && normalized.coverage.assigned.length) {
+    console.log(
+      `  coverage: attached ${normalized.coverage.assigned.length} otherwise-undocumented source file(s) to pages`
+    );
+  }
 
   if (args.dryRun) {
     diagnostics.finish('dry-run', {

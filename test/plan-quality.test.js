@@ -123,3 +123,27 @@ test('topicKeys produces stable semantic keys', () => {
     { path: 'guides/exporting.md', title: 'Export to PDF' },
   ]), ['architecture', 'export', 'guides', 'overview', 'providers']);
 });
+
+test('flags source files absent from every page scope when a scan is supplied', () => {
+  const scan = { fileSet: new Set(['README.md', 'lib/a.js', 'lib/b.js']) };
+  const pages = [{ path: 'overview.md', title: 'Overview', files: ['README.md', 'lib/a.js'] }];
+  const result = validatePlanQuality(pages, [], { scan });
+  const violation = result.violations.find(item => item.code === 'plan_uncovered_files');
+  assert.ok(violation);
+  assert.deepEqual(violation.files, ['lib/b.js']);
+  assert.equal(result.ok, false);
+});
+
+test('coverage gate passes when every source file is scoped', () => {
+  const scan = { fileSet: new Set(['README.md', 'lib/a.js']) };
+  const pages = [{ path: 'overview.md', title: 'Overview', files: ['README.md', 'lib/a.js'] }];
+  assert.equal(validatePlanQuality(pages, [], { scan }).ok, true);
+});
+
+test('coverage gate is inert without a scan', () => {
+  const pages = [{ path: 'overview.md', title: 'Overview', files: [] }];
+  assert.equal(
+    validatePlanQuality(pages, []).violations.some(item => item.code === 'plan_uncovered_files'),
+    false
+  );
+});
