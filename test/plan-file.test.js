@@ -98,3 +98,21 @@ test('loadWikiPlan prefers yaml, accepts json, returns null when absent', () => 
   fs.writeFileSync(path.join(repo, 'wiki_plan.yaml'), 'version: 1\nrepowiki:\n  notes:\n    - text: from yaml\n');
   assert.equal(loadWikiPlan(repo).repowiki.notes[0].text, 'from yaml');
 });
+
+test('parser robustness: CRLF, colons in values, 1-space indents, quote-aware comments, duplicate keys, unterminated quotes', () => {
+  const crlf = 'version: 1\r\nrepowiki:\r\n  template: ""\r\n';
+  assert.equal(parseWikiPlanYaml(crlf).repowiki.template, '');
+  const colon = 'version: 1\nrepowiki:\n  notes:\n    - text: "http://example.com:8080 docs"\n';
+  assert.equal(parseWikiPlanYaml(colon).repowiki.notes[0].text, 'http://example.com:8080 docs');
+  const one = 'version: 1\nscope:\n include:\n  - "src/**"\n';
+  assert.deepEqual(parseWikiPlanYaml(one).scope.include, ['src/**']);
+  const hash = 'version: 1\nrepowiki:\n  notes:\n    - text: "issue #1 fix"\n';
+  assert.equal(parseWikiPlanYaml(hash).repowiki.notes[0].text, 'issue #1 fix');
+  assert.throws(() => parseWikiPlanYaml('version: 1\nrepowiki:\n  template: a\n  template: b\n'), /duplicate key/i);
+  assert.throws(() => parseWikiPlanYaml('version: 1\nrepowiki:\n  notes:\n    - text: "unterminated\n'), /quote/i);
+});
+
+test('prototype-pollution keys and array top-level are rejected', () => {
+  assert.throws(() => parseWikiPlanYaml('version: 1\n__proto__:\n  x: 1\n'), /invalid key/i);
+  assert.throws(() => parseWikiPlanJson('[]'), /map/i);
+});
