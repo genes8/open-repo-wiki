@@ -226,6 +226,14 @@ function createMockServer({
     });
   });
   server.state = state;
+  // Convenience helpers for the fixed-port integration tests (test/config.json
+  // points at http://127.0.0.1:8688/v1). Existing tests may still use listen(0)
+  // directly for an ephemeral port.
+  server.start = (port = 8688) => new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', resolve);
+  });
+  server.stop = () => new Promise(resolve => server.close(resolve));
   return server;
 }
 
