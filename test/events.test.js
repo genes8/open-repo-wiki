@@ -36,3 +36,25 @@ test('human reporter maps page statuses to the CLI labels', () => {
     '  FAIL  b.md: boom',
   ]);
 });
+
+test('payload cannot override type or ts', () => {
+  const { bus, emit } = createEventBus();
+  const seen = [];
+  bus.on('event', e => seen.push(e));
+  emit('page_done', { type: 'run_started', ts: 'bogus', path: 'a.md' });
+  assert.equal(seen[0].type, 'page_done');
+  assert.notEqual(seen[0].ts, 'bogus');
+});
+
+test('human reporter survives an unknown page status', () => {
+  const out = [];
+  createHumanReporter(line => out.push(line))({ type: 'page_done', path: 'x.md', status: 'wat' });
+  assert.equal(out.length, 1);
+  assert.match(out[0], /SKIP/);
+});
+
+test('a throwing reporter does not break emit', () => {
+  const { bus, emit } = createEventBus();
+  bus.on('event', () => { throw new Error('renderer boom'); });
+  emit('page_done', { path: 'a.md' }); // must not throw
+});
