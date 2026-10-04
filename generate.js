@@ -87,7 +87,11 @@ function parseArgs(argv) {
   const report = args.jsonEvents ? createNdjsonReporter() : createHumanReporter();
 
   if (args.listModels) {
-    loadDotenv(repoDir);
+    if (args.jsonEvents) {
+      loadDotenv(repoDir);
+    } else {
+      loadDotenv(repoDir, (type, payload) => report({ type, ...payload }));
+    }
     const { config } = loadConfig(args, repoDir);
     if (args.jsonEvents) {
       for (const [name, p] of Object.entries(config.models || {})) {
@@ -108,8 +112,9 @@ function parseArgs(argv) {
     process.exit(0);
   } catch (err) {
     const code = err instanceof ApiError && err.code ? err.code : 'fatal';
-    if (args.jsonEvents) report({ type: 'run_error', code, message: err.message });
-    else console.error(`Fatal: ${err.message}`);
+    const message = String(err && err.message || err);
+    if (args.jsonEvents) report({ type: 'run_error', code, message });
+    else console.error(`Fatal: ${message}`);
     process.exit(1);
   }
 })();
