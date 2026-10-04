@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { loadWikiPlan, parseWikiPlanYaml } = require('../lib/plan-file');
+const { loadWikiPlan, parseWikiPlanYaml, parseWikiPlanJson } = require('../lib/plan-file');
 
 const VALID = `# guidance for the wiki generator
 version: 1
@@ -74,6 +74,14 @@ test('invalid template value is rejected', () => {
 
 test('version must be 1', () => {
   assert.throws(() => parseWikiPlanYaml('version: 2\n'), /version/);
+});
+
+test('version must be exactly 1 (integer or yaml string), not coercions', () => {
+  assert.throws(() => parseWikiPlanJson('{"version":true}'), /version/);
+  assert.throws(() => parseWikiPlanYaml('version: 01\n'), /version/);
+  assert.throws(() => parseWikiPlanYaml('version: 1.0\n'), /version/);
+  assert.doesNotThrow(() => parseWikiPlanYaml('version: 1\n'));
+  assert.doesNotThrow(() => parseWikiPlanJson('{"version":1}'));
 });
 
 test('tabs are rejected', () => {
