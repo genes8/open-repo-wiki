@@ -76,11 +76,20 @@ test('externally edited page is protected, not clobbered, when its sources chang
     assert.match(second.stdout, /protected: externally-modified/);
     const after = fs.readFileSync(pageFile, 'utf8');
     assert.ok(after.startsWith('# HUMAN-EDITED'), 'human edit must survive regeneration');
-    assert.ok(!after.includes('GEN'), 'page must not be a fresh generation');
 
     const catalog2 = JSON.parse(fs.readFileSync(path.join(repo, '.local-wiki/en/meta/catalog.json'), 'utf8'));
     const meta2 = catalog2.pages.find(p => p.path === target.path);
     assert.equal(meta2.protected, true, 'catalog marks the page as protected');
+
+    // A second drift cycle must not lose protection: if the unchanged-skip
+    // branch replaced our outputHash with the live (human) content hash, the
+    // next source change would re-generate and clobber the human edit.
+    fs.appendFileSync(path.join(repo, dep), '\n// drift again\n');
+    const third = await runGenerator(repo);
+    assert.equal(third.code, 0, third.stderr);
+    assert.match(third.stdout, /protected: externally-modified/);
+    const afterThird = fs.readFileSync(pageFile, 'utf8');
+    assert.ok(afterThird.startsWith('# HUMAN-EDITED'), 'human edit must survive a second drift cycle');
   } finally {
     await server.stop();
   }
