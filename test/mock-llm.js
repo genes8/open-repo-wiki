@@ -56,6 +56,22 @@ function extractChildLinks(userMessage) {
   return block ? block[1].trim() : '';
 }
 
+function extractAssignedDocumentTitles(userMessage) {
+  const titles = [];
+  const regex = /^- title: ("(?:\\.|[^"\\])*")\s*(?:,|$)/gm;
+  let match;
+  while ((match = regex.exec(userMessage))) {
+    try { titles.push(JSON.parse(match[1])); } catch { /* skip malformed titles */ }
+  }
+  return titles;
+}
+
+function defaultAssignResponse({ userMessage }) {
+  return {
+    documents: extractAssignedDocumentTitles(userMessage).map(title => ({ title, files: [] })),
+  };
+}
+
 function defaultPageResponse({ title, userMessage }) {
   const cite = userMessage.match(/<cite>[\s\S]*?<\/cite>/);
   const range = userMessage.match(
@@ -104,6 +120,7 @@ function createMockServer({
   planResponder,
   pageResponder = defaultPageResponse,
   knowledgeResponder = defaultKnowledgeResponse,
+  assignResponder,
   finishReasonResponder = () => 'stop',
   delay = 0,
 } = {}) {
@@ -113,8 +130,10 @@ function createMockServer({
     pageRequests: 0,
     repairRequests: 0,
     knowledgeRequests: 0,
+    assignRequests: 0,
     lastPlanRunRequests: 0,
     byTitle: {},
+    requestBodies: [],
   };
 
   const server = http.createServer((request, response) => {
@@ -138,10 +157,28 @@ function createMockServer({
           .map(message => message.content)
           .join('\n');
         state.requests++;
+        state.requestBodies.push({ body });
 
         let content;
         let responseContext;
-        if (/valid JSON only/i.test(systemMessage)) {
+        if (/assigning source files to documentation pages/i.test(systemMessage)) {
+          state.assignRequests++;
+          const chosen = assignResponder
+            ? await assignResponder({
+              payload,
+              state,
+              systemMessage,
+              userMessage,
+              defaultResponse: () => defaultAssignResponse({ userMessage }),
+            })
+            : defaultAssignResponse({ userMessage });
+          content = typeof chosen === 'string' ? chosen : JSON.stringify(chosen);
+          responseContext = {
+            kind: 'assign',
+            title: null,
+            attempt: state.assignRequests,
+          };
+        } else if (/valid JSON only/i.test(systemMessage)) {
           const isRepair = /repairing a rejected wiki plan/i.test(systemMessage);
           if (!isRepair) state.lastPlanRunRequests = 0;
           state.planRequests++;
@@ -234,6 +271,7 @@ function createMockServer({
     server.listen(port, '127.0.0.1', resolve);
   });
   server.stop = () => new Promise(resolve => server.close(resolve));
+  server.requests = () => state.requestBodies;
   return server;
 }
 
@@ -251,5 +289,6 @@ module.exports = {
   createMockServer,
   defaultPageResponse,
   defaultKnowledgeResponse,
+  defaultAssignResponse,
   DEFAULT_PLAN,
 };
