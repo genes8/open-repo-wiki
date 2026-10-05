@@ -30,6 +30,35 @@ const FIXTURE_PLAN = {
   ],
 };
 
+const LANDING_PLAN = {
+  pages: [
+    {
+      path: 'overview.md',
+      title: 'Project Overview',
+      description: 'Overview of the fixture repository',
+      files: ['a.js', 'b.js'],
+    },
+    {
+      path: 'guides/guides.md',
+      title: 'Guides',
+      description: 'Section landing page',
+      files: ['a.js'],
+    },
+    {
+      path: 'guides/getting-started.md',
+      title: 'Getting Started',
+      description: 'Install and run',
+      files: ['a.js'],
+    },
+    {
+      path: 'guides/configuration.md',
+      title: 'Configuration',
+      description: 'Config options',
+      files: ['b.js'],
+    },
+  ],
+};
+
 function runCli(args) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [GENERATOR, ...args], {
@@ -53,8 +82,8 @@ function makeRepo() {
   return repo;
 }
 
-async function startMock(repo) {
-  const server = createMockServer({ plan: FIXTURE_PLAN });
+async function startMock(repo, plan = FIXTURE_PLAN) {
+  const server = createMockServer({ plan });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
@@ -122,6 +151,51 @@ test('modify fails cleanly for an unknown page path', async () => {
     const mod = await runCli([repo, '--config', configPath, '--modify', 'nope.md', '--op', 'rewrite', '--instruction', 'x']);
     assert.notEqual(mod.code, 0);
     assert.match(mod.stderr, /nope\.md/);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('modify a landing page succeeds with the landing profile', async () => {
+  const repo = makeRepo();
+  const { server, configPath } = await startMock(repo, LANDING_PLAN);
+  try {
+    assert.equal((await runCli([repo, '--config', configPath])).code, 0);
+    const catalog = JSON.parse(fs.readFileSync(path.join(repo, '.local-wiki/en/meta/catalog.json'), 'utf8'));
+    const landing = catalog.pages.find(p => p.isLanding);
+    assert.ok(landing, 'fixture must include a landing page');
+
+    const mod = await runCli([repo, '--config', configPath,
+      '--modify', landing.path,
+      '--instruction', 'Rewrite the first section to describe the mock provider']);
+    assert.equal(mod.code, 0, mod.stderr);
+    assert.match(fs.readFileSync(path.join(repo, '.local-wiki/en/content', landing.path), 'utf8'), /modified_/);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('catalog fallback protects a curated page after .state.json is lost', async () => {
+  const repo = makeRepo();
+  const { server, configPath } = await startMock(repo);
+  try {
+    assert.equal((await runCli([repo, '--config', configPath])).code, 0);
+    const catalog = JSON.parse(fs.readFileSync(path.join(repo, '.local-wiki/en/meta/catalog.json'), 'utf8'));
+    const target = catalog.pages.find(p => !p.isLanding) || catalog.pages[0];
+    const pageFile = path.join(repo, '.local-wiki/en/content', target.path);
+
+    assert.equal((await runCli([repo, '--config', configPath,
+      '--modify', target.path, '--op', 'supplement',
+      '--instruction', 'Add a section about the mock provider'])).code, 0);
+    const modified = fs.readFileSync(pageFile, 'utf8');
+
+    fs.unlinkSync(path.join(repo, '.local-wiki/en/content', '.state.json'));
+    const dep = target.dependent_files[0] || 'a.js';
+    fs.appendFileSync(path.join(repo, dep), '\n// drift\n');
+    const drift = await runCli([repo, '--config', configPath]);
+    assert.equal(drift.code, 0, drift.stderr);
+    assert.match(drift.stdout, /protected: curated/);
+    assert.equal(fs.readFileSync(pageFile, 'utf8'), modified, 'catalog metadata protects the modified page');
   } finally {
     await server.stop();
   }
