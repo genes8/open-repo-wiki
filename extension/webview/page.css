@@ -1,1 +1,16 @@
-/* Task 5 */
+:root { color-scheme: light dark; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
+#topbar { display: flex; gap: 8px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--vscode-panel-border, #ddd); position: sticky; top: 0; background: var(--vscode-sideBar-background, #fff); }
+#title { font-weight: 600; }
+#badges .badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--vscode-badge-background, #666); color: var(--vscode-badge-foreground, #fff); margin-right: 4px; }
+#edit-source { margin-left: auto; cursor: pointer; }
+main { max-width: 860px; margin: 0 auto; padding: 24px 32px 64px; line-height: 1.6; }
+main h1 { border-bottom: 1px solid var(--vscode-panel-border, #ddd); padding-bottom: 8px; }
+main h2 { border-bottom: 1px solid var(--vscode-panel-border, #eee); padding-bottom: 4px; margin-top: 32px; }
+main pre { background: var(--vscode-textCodeBlock-background, #f6f8fa); padding: 12px; border-radius: 6px; overflow: auto; }
+main code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+main table { border-collapse: collapse; }
+main th, main td { border: 1px solid var(--vscode-panel-border, #ddd); padding: 6px 12px; }
+main blockquote { border-left: 4px solid var(--vscode-panel-border, #ddd); margin-left: 0; padding-left: 12px; color: var(--vscode-descriptionForeground, #666); }
+main a { color: var(--vscode-textLink-foreground, #0969da); }
+main img { max-width: 100%; }

@@ -24,3 +24,21 @@ export function pageUriPath(pagePath: string, language = 'en'): string {
   const { outDir } = wikiPaths('', language);
   return path.join(outDir, pagePath);
 }
+
+export function resolveHref(catalog: Catalog, currentPagePath: string, href: string): string | null {
+  if (/^[a-z]+:\/\//i.test(href) || href.startsWith('#') || href.startsWith('mailto:')) return null;
+  const clean = href.split('#')[0].trim();
+  if (!clean || !clean.toLowerCase().endsWith('.md')) return null;
+  const baseDir = currentPagePath.includes('/') ? currentPagePath.slice(0, currentPagePath.lastIndexOf('/')) : '';
+  const joined = clean.startsWith('/') ? clean.slice(1) : (baseDir ? `${baseDir}/${clean}` : clean);
+  const normalized: string[] = [];
+  for (const segment of joined.split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') { normalized.pop(); continue; }
+    normalized.push(segment);
+  }
+  const target = normalized.join('/');
+  if (catalog.pages.some(p => p.path === target)) return target;
+  const byBasename = catalog.pages.find(p => p.path.endsWith(`/${target}`) || p.path === target);
+  return byBasename ? byBasename.path : null;
+}

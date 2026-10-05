@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as path from 'node:path';
-import { buildTree, pageUriPath } from '../src/pure/treeModel.js';
+import { buildTree, pageUriPath, resolveHref } from '../src/pure/treeModel.js';
 import type { CatalogPage } from '../src/pure/catalog.js';
 
 const mk = (over: Partial<CatalogPage>): CatalogPage => ({
@@ -31,4 +31,17 @@ test('orphans (unknown parent) surface at root instead of vanishing', () => {
 
 test('pageUriPath produces repo-relative file paths', () => {
   assert.equal(pageUriPath('guides/testing.md'), path.join('.local-wiki', 'en', 'content', 'guides/testing.md'));
+});
+
+test('resolveHref resolves relative markdown links against the current page', () => {
+  const pages = [
+    mk({ path: 'overview.md', title: 'O' }),
+    mk({ path: 'guides/guides.md', title: 'G', isLanding: true }),
+    mk({ path: 'guides/testing.md', title: 'T', parent: 'guides/guides.md' }),
+  ];
+  const catalog = { repo: 'r', model: 'm', language: 'en', generatedAt: '', pages };
+  assert.equal(resolveHref(catalog, 'guides/testing.md', 'guides.md'), 'guides/guides.md');
+  assert.equal(resolveHref(catalog, 'guides/testing.md', '../overview.md'), 'overview.md');
+  assert.equal(resolveHref(catalog, 'overview.md', 'guides/testing.md'), 'guides/testing.md');
+  assert.equal(resolveHref(catalog, 'overview.md', 'https://x.dev/a.md'), null);
 });

@@ -1,9 +1,13 @@
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { EngineRunner } from './engineRunner.js';
 import { resolveEnginePaths, resolveNodeCommand } from './enginePaths.js';
 import { buildGenerateArgs } from './pure/args.js';
+import { readCatalog } from './pure/catalog.js';
 import { createRunProgress } from './pure/progress.js';
-import type { TreeNode } from './pure/treeModel.js';
+import { pageUriPath, resolveHref, type TreeNode } from './pure/treeModel.js';
+import { WikiPreview } from './preview.js';
 import { WikiTree } from './wikiTree.js';
 
 const outputChannel = vscode.window.createOutputChannel('Repo Wiki Engine');
@@ -12,19 +16,50 @@ const runner = new EngineRunner();
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(outputChannel);
 
-  const tree = new WikiTree(workspaceRoot, () => vscode.workspace.getConfiguration('openRepoWiki').get<string>('language') || 'en');
+  const getLanguage = () => vscode.workspace.getConfiguration('openRepoWiki').get<string>('language') || 'en';
+  const tree = new WikiTree(workspaceRoot, getLanguage);
+  const preview = new WikiPreview(context.extensionPath);
+  let currentPagePath = '';
+
+  const showPage = async (page: TreeNode): Promise<void> => {
+    const root = workspaceRoot();
+    if (!root) return;
+    const pageFile = path.join(root, pageUriPath(page.page.path, getLanguage()));
+    try {
+      const markdown = await fs.readFile(pageFile, 'utf8');
+      currentPagePath = page.page.path;
+      preview.show(
+        { path: page.page.path, title: page.page.title, markdown, protected: page.page.protected, quality: page.page.quality },
+        (href) => {
+          const navRoot = workspaceRoot();
+          if (!navRoot) return;
+          const catalog = readCatalog(navRoot, getLanguage());
+          if (!catalog) { void vscode.window.showWarningMessage('Repo Wiki: no catalog available for navigation.'); return; }
+          const target = resolveHref(catalog, currentPagePath, href);
+          if (!target) { void vscode.window.showWarningMessage(`Repo Wiki: cannot resolve link: ${href}`); return; }
+          const targetPage = catalog.pages.find(p => p.path === target);
+          if (!targetPage) { void vscode.window.showWarningMessage(`Repo Wiki: page not in catalog: ${target}`); return; }
+          void showPage({ page: targetPage, children: [] });
+        },
+        (pagePath) => {
+          const editRoot = workspaceRoot();
+          if (!editRoot) return;
+          const uri = vscode.Uri.file(path.join(editRoot, pageUriPath(pagePath, getLanguage())));
+          void vscode.window.showTextDocument(uri).then(undefined, () => {
+            void vscode.window.showErrorMessage(`Repo Wiki: page file missing: ${pagePath}`);
+          });
+        },
+      );
+    } catch {
+      void vscode.window.showErrorMessage(`Repo Wiki: page file missing: ${page.page.path}`);
+    }
+  };
+
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('openRepoWiki.pages', tree),
     vscode.commands.registerCommand('openRepoWiki.refreshTree', () => tree.refresh()),
     vscode.commands.registerCommand('openRepoWiki.openPage', async (node: TreeNode) => {
-      const root = workspaceRoot();
-      if (!root) return;
-      const file = vscode.Uri.file(`${root}/${tree.pageFilePath(node)}`);
-      try {
-        await vscode.window.showTextDocument(file);
-      } catch {
-        void vscode.window.showErrorMessage(`Repo Wiki: page file missing: ${node.page.path}`);
-      }
+      await showPage(node);
     }),
   );
   tree.refresh();
