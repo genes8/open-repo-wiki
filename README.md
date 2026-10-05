@@ -59,24 +59,34 @@ node generate.js /path/to/repo -m gguf         # direct .gguf, no server
 ## CLI — generate.js
 
 ```
-node generate.js [repoDir] [options]
-  -m, --model <name>    model profile (or REPO_WIKI_MODEL env var)
-  -o, --out <dir>       output dir (default <repo>/.local-wiki/en/content)
-  -c, --config <file>   config (default: <repo>/repo-wiki.config.json, then ./config.json)
+Local Repo Wiki generator
+
+Usage: node generate.js [repoDir] [options]
+
+Options:
+  -m, --model <name>    model profile from config (default: config "default")
+  -o, --out <dir>       output dir (default: <repoDir>/.local-wiki/en/content)
+  -c, --config <file>   config file (default: <repoDir>/repo-wiki.config.json,
+                        then <appDir>/config.json)
       --pages <substr>  only (re)generate pages whose path contains substring
-      --concurrency <n> pages generated in parallel (default: profile `concurrency`, else 1)
-      --template <name> `standard` (citations + optional TOC) or `minimal`
-                        (grounding citations without TOC guidance)
-      --knowledge       also generate semantic module and cross-cutting knowledge cards
-      --force           ignore the incremental cache
-      --dry-run         validate/show the plan and write diagnostics, but do not
-                        stage or publish wiki output
+      --concurrency <n> pages generated in parallel (default: profile/config, else 1)
+      --template <name> page template: "standard" (citations + TOC) or "minimal"
+      --knowledge       also generate the structured knowledge-card layer
+      --force           regenerate everything, ignore the incremental cache
+      --dry-run         print the wiki plan and exit without writing pages
       --prune           delete managed pages omitted by a successful,
                         non-regressive full plan
       --accept-plan-shrink
                         accept a regressive plan and delete omitted managed pages
-                        (cannot be combined with --pages)
-      --list-models     show all profiles and whether API keys are set
+      --json-events     machine mode: NDJSON events on stdout instead of human logs
+      --modify <path>   modify an existing page (see --op); pairs with --instruction
+      --op <name>       operation for --modify: modify | supplement | rewrite
+      --instruction <text>
+                        instruction describing the desired change (required with --modify)
+      --list-models     list configured model profiles and exit
+  -h, --help            show this help
+
+Environment: REPO_WIKI_MODEL overrides the default model profile.
 ```
 
 Deletion is opt-in. A normal successful run keeps previously managed pages that
@@ -140,6 +150,119 @@ in a target repository to override per-project. Profile fields:
   }
 }
 ```
+
+## Wiki plan file
+
+Optionally commit a `wiki_plan.yaml` (or `wiki_plan.json`) at the repo root to
+pin the page list, inject guidance notes, pick a template preset, and constrain
+source files with gitignore-style scope globs. See
+[wiki-plan.schema.md](wiki-plan.schema.md) for the full schema, examples, and
+strict-parser limitations.
+
+## Editing the wiki
+
+Pages the generator publishes are protected from being silently clobbered by a
+later run. Two independent hashes are tracked per page:
+
+- **Source hash** (`state.pages[path]`) — the model/language/template/page
+  metadata plus the raw contents of every source file attached to the page.
+- **Output hash** (`pageMetadata[path].outputHash`) — the published markdown as
+  last written by the generator.
+
+If a human edits a published page, the output hash no longer matches, so a later
+run reports `protected: externally-modified`, skips the page, and never
+overwrites the edit — even when the underlying source files changed or the code
+drifted. A page marked `curated` (see below) is likewise skipped as
+`protected: curated`. Protected pages are retained in the catalog/index.
+
+`--force` overrides both protections: it regenerates every page (or the matching
+`--pages` subset) and overwrites the manual edits.
+
+Three edit operations are available on an already-generated wiki:
+
+```bash
+node generate.js /path/to/repo --modify guides/getting-started.md \
+  --op modify --instruction "Update the Node version in the setup section"
+
+node generate.js /path/to/repo --modify guides/getting-started.md \
+  --op supplement --instruction "Add a troubleshooting section"
+
+node generate.js /path/to/repo --modify guides/getting-started.md \
+  --op rewrite --instruction "Restructure around a quick-start-first flow"
+```
+
+- `modify` — change only what the instruction asks; keep structure, headings,
+  and style.
+- `supplement` — append new content; never delete or rewrite existing sections.
+- `rewrite` — produce a fresh full rewrite of the page, restructuring allowed.
+
+`--modify` resolves the page against the published catalog (exact path, then a
+unique substring), rewrites it through the same quality/citation validation as
+generation, and marks the page `curated: true` so future runs protect it. The
+rewrite commits atomically together with the refreshed catalog. A `modify` run
+still requires the model profile and a prior successful generation.
+
+In `catalog.json`, each page carries a `protected` flag, set when the page is
+`curated` (edited via `--modify`) or `externallyModified` (hand-edited since the
+last generator write).
+
+## Programmatic API + events
+
+Everything the CLI does is available via `lib/api.js` as Promise-based
+functions that emit typed events:
+
+```js
+const { generateWiki, modifyWiki, ApiError } = require('./lib/api');
+
+// Tap events; the same vocabulary is emitted as NDJSON via --json-events.
+await generateWiki('/path/to/repo', { model: 'ollama-qwen' }, (event) => {
+  if (event.type === 'page_done') console.log(`${event.path} ${event.status}`);
+});
+```
+
+Exports: `generateWiki`, `modifyWiki`, `ApiError`, `loadConfig`, `loadDotenv`,
+`pickProfile`, `listModels`, `GENERATION_SCHEMA_VERSION`. Options accept the CLI
+flag names (`model`, `out`, `config`, `pages`, `concurrency`, `template`,
+`knowledge`, `force`, `dryRun`, `prune`, `acceptPlanShrink`) or their camelCase
+programmatic forms (`configPath`, `dryRun`, ...).
+
+Every event has `type` and `ts` (ISO-8601 timestamp added by the bus). The full
+vocabulary:
+
+| Event | Payload fields |
+|---|---|
+| `run_started` | `repo`, `model`, `provider`, `modelId`, `configPath`, `outDir`, `mode?` |
+| `env_loaded` | `count` |
+| `scan_started` | — |
+| `scan_done` | `files` |
+| `plan_file_loaded` | `file`, `documents`, `scope{include,exclude}` |
+| `scan_warning` | `message` |
+| `run_note` | `message` |
+| `plan_started` | — |
+| `plan_retry` | `attempt`, `codes` |
+| `plan_ready` | `pages[{path,title}]`, `coverage`, `strict?` |
+| `dry_run` | — |
+| `page_start` | `path` |
+| `page_retry` | `path`, `attempt`, `codes` |
+| `page_note` | `path`, `message` |
+| `page_done` | `path`, `status` (`generated`\|`degraded`\|`protected`\|`skipped`), `chars?`, `files?`, `reason?`, `codes?` |
+| `page_fail` | `path`, `message` |
+| `stale_removed` | `path` |
+| `catalog_written` | `metaDir` |
+| `knowledge_started` | — |
+| `knowledge_card_fail` | `path`, `message` |
+| `knowledge_done` | `generated`, `duplicates`, `removed`, `dir` |
+| `knowledge_failed_run` | `failed` |
+| `run_aborted` | `ok`, `skipped`, `failed`, `subject` |
+| `run_finished` | `stats{generated,degraded,skipped,failed,knowledgeFailed}`, `outDir`, `tip` |
+| `run_error` | `code`, `message` |
+| `cleanup_warning` | `target`, `message` |
+| `model_profile` | `name`, `default`, `provider`, `model` |
+
+`ApiError` carries a stable `code` (`bad_config`, `unknown_model`, `bad_args`,
+`no_files`, `bad_plan_file`, `empty_scope`, `plan_failed`, `page_failures`,
+`knowledge_failures`, `no_wiki`, `unknown_page`, `modify_validation`, ...); the
+CLI maps it to a non-zero exit code.
 
 ## Using GLM-5.2 (Zhipu cloud API)
 
