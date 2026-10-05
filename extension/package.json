@@ -1,0 +1,77 @@
+{
+  "name": "open-repo-wiki",
+  "displayName": "Open Repo Wiki",
+  "description": "Generate, browse, and edit an AI documentation wiki for any repository — works with any LLM backend.",
+  "version": "0.1.0",
+  "publisher": "genes8",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other", "AI", "Documentation"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "openRepoWiki.generate", "title": "Repo Wiki: Generate / Update Wiki", "icon": "$(play)" },
+      { "command": "openRepoWiki.refreshTree", "title": "Repo Wiki: Refresh", "icon": "$(refresh)" },
+      { "command": "openRepoWiki.openSettings", "title": "Repo Wiki: Settings", "icon": "$(gear)" },
+      { "command": "openRepoWiki.selectLanguage", "title": "Repo Wiki: Select Language", "icon": "$(globe)" },
+      { "command": "openRepoWiki.modifyPage", "title": "Repo Wiki: Modify Page…", "icon": "$(edit)" },
+      { "command": "openRepoWiki.editPlan", "title": "Repo Wiki: Edit wiki_plan.yaml" },
+      { "command": "openRepoWiki.exportPdf", "title": "Repo Wiki: Export to PDF", "icon": "$(file-pdf)" },
+      { "command": "openRepoWiki.selectModel", "title": "Repo Wiki: Select Model Profile" },
+      { "command": "openRepoWiki.showOutput", "title": "Repo Wiki: Show Engine Output" }
+    ],
+    "viewsContainers": {
+      "activitybar": [{ "id": "open-repo-wiki", "title": "Repo Wiki", "icon": "media/icon.svg" }]
+    },
+    "views": {
+      "open-repo-wiki": [{ "type": "tree", "id": "openRepoWiki.pages", "name": "Wiki Pages" }]
+    },
+    "viewsWelcome": [
+      {
+        "view": "openRepoWiki.pages",
+        "contents": "No wiki found for this workspace.\n[Generate Wiki](command:openRepoWiki.generate)\nTo learn more, [open settings](command:openRepoWiki.openSettings)."
+      }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "openRepoWiki.generate", "when": "view == openRepoWiki.pages", "group": "navigation@1" },
+        { "command": "openRepoWiki.refreshTree", "when": "view == openRepoWiki.pages", "group": "navigation@2" },
+        { "command": "openRepoWiki.selectLanguage", "when": "view == openRepoWiki.pages", "group": "navigation@3" },
+        { "command": "openRepoWiki.openSettings", "when": "view == openRepoWiki.pages", "group": "navigation@4" }
+      ],
+      "view/item/context": [
+        { "command": "openRepoWiki.modifyPage", "when": "view == openRepoWiki.pages && viewItem == page", "group": "inline@1" },
+        { "command": "openRepoWiki.exportPdf", "when": "view == openRepoWiki.pages", "group": "inline@2" }
+      ]
+    },
+    "configuration": {
+      "title": "Open Repo Wiki",
+      "properties": {
+        "openRepoWiki.defaultModel": { "type": "string", "default": "", "description": "Model profile from the engine config (empty = engine default)." },
+        "openRepoWiki.language": { "type": "string", "default": "en", "description": "Wiki output language (used for the .local-wiki/<lang> directory)." },
+        "openRepoWiki.configPath": { "type": "string", "default": "", "description": "Path to a repo-wiki.config.json (empty = engine auto-discovery)." },
+        "openRepoWiki.enginePath": { "type": "string", "default": "", "description": "Full engine install (folder containing generate.js). Empty = monorepo checkout or bundled engine." },
+        "openRepoWiki.nodePath": { "type": "string", "default": "", "description": "Node binary for the engine child process (empty = node from PATH, then VSCode's builtin)." },
+        "openRepoWiki.autoUpdate": { "type": "string", "enum": ["notify", "auto", "off"], "default": "notify", "description": "What to do when a saved source file belongs to a wiki page: show a status-bar hint, auto-run generation, or nothing." }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node --test out-test/test/",
+    "package": "npm run compile && vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^2.26.0",
+    "esbuild": "^0.21.0",
+    "highlight.js": "11.9.0",
+    "marked": "4.3.0",
+    "mermaid": "10.9.0",
+    "typescript": "^5.4.0"
+  }
+}
