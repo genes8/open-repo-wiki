@@ -61,7 +61,7 @@
     "compile": "node build.mjs",
     "watch": "node build.mjs --watch",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.test.json && node --test out-test/test/",
+    "test": "tsc -p tsconfig.test.json && node --test 'out-test/test/*.test.js'",
     "package": "npm run compile && vsce package"
   },
   "devDependencies": {
