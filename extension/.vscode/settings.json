@@ -1,0 +1,7 @@
+{
+  // Extension workspace: open this FOLDER in VSCode and press F5.
+  // Keep editor/meta noise out of git except the launch config we share.
+  "files.exclude": { "**/dist": true, "**/out-test": true },
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": false
+}
