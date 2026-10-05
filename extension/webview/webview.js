@@ -29,10 +29,10 @@
     // Links: internal .md links navigate in-panel; the rest open externally.
     main.querySelectorAll('a[href]').forEach(anchor => {
       anchor.addEventListener('click', (event) => {
-        event.preventDefault();
         const href = anchor.getAttribute('href') || '';
-        if (/^[a-z]+:\/\//i.test(href) || href.startsWith('#')) {
-          if (href.startsWith('#')) return; // in-page anchors: default behavior
+        if (href.startsWith('#')) return; // in-page anchors: default behavior
+        event.preventDefault();
+        if (/^[a-z]+:\/\//i.test(href)) {
           post({ command: 'openExternal', href });
         } else {
           post({ command: 'navigate', href });
