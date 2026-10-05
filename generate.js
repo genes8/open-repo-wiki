@@ -95,7 +95,7 @@ function parseArgs(argv) {
     const { config } = loadConfig(args, repoDir);
     if (args.jsonEvents) {
       for (const [name, p] of Object.entries(config.models || {})) {
-        report({ type: 'model_profile', name, default: name === config.default, provider: p.provider, model: p.model || p.modelPath || null });
+        report({ type: 'model_profile', ts: new Date().toISOString(), name, default: name === config.default, provider: p.provider, model: p.model || p.modelPath || null });
       }
     } else {
       listModels(config);
@@ -113,7 +113,7 @@ function parseArgs(argv) {
   } catch (err) {
     const code = err instanceof ApiError && err.code ? err.code : 'fatal';
     const message = String(err && err.message || err);
-    if (args.jsonEvents) report({ type: 'run_error', code, message });
+    if (args.jsonEvents) report({ type: 'run_error', ts: new Date().toISOString(), code, message });
     else console.error(`Fatal: ${message}`);
     process.exit(1);
   }
