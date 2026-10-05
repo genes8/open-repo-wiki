@@ -109,6 +109,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(vscode.commands.registerCommand('openRepoWiki.showOutput', () => outputChannel.show()));
 
+  context.subscriptions.push(vscode.commands.registerCommand('openRepoWiki.openSettings', () =>
+    vscode.commands.executeCommand('workbench.action.openSettings', 'openRepoWiki')));
+
   context.subscriptions.push(vscode.commands.registerCommand('openRepoWiki.generate', async () => {
     const root = workspaceRoot();
     if (!root) { void vscode.window.showWarningMessage('Repo Wiki: open a workspace folder first.'); return; }
@@ -179,6 +182,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.commands.registerCommand('openRepoWiki.selectModel', async () => {
     const root = workspaceRoot();
     if (!root) return;
+    if (runner.isActive()) { void vscode.window.showInformationMessage('Repo Wiki: a run is already in progress.'); return; }
     const config = vscode.workspace.getConfiguration('openRepoWiki');
     const engine = resolveEnginePaths(context.extensionPath, config.get<string>('enginePath') || undefined);
     const node = resolveNodeCommand(config.get<string>('nodePath') || undefined);
