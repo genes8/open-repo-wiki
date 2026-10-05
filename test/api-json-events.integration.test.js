@@ -107,7 +107,14 @@ test('--json-events emits a parseable NDJSON event stream on stdout', async t =>
   const events = parseJsonLines(run.stdout);
   assert.ok(events.length > 0, 'expected at least one NDJSON event on stdout');
 
-  assert.equal(events[0].type, 'run_started', `first event was ${events[0].type}`);
+  // An app-dir .env (gitignored, present in real checkouts) legitimately emits
+  // env_loaded before run_started, so run_started must simply precede the
+  // page/plan events and any pre-run events may only be env_loaded.
+  const runStartedIndex = events.findIndex(event => event.type === 'run_started');
+  assert.ok(runStartedIndex !== -1, `no run_started event (got: ${events.map(e => e.type).join(', ')})`);
+  for (const before of events.slice(0, runStartedIndex)) {
+    assert.equal(before.type, 'env_loaded', `unexpected pre-run event ${before.type}`);
+  }
   assert.equal(events.at(-1).type, 'run_finished', `last event was ${events.at(-1).type}`);
 
   const types = new Set(events.map(event => event.type));
