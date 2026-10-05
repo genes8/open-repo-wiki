@@ -117,7 +117,8 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('openRepoWiki.pages', tree),
     vscode.commands.registerCommand('openRepoWiki.refreshTree', () => tree.refresh()),
-    vscode.commands.registerCommand('openRepoWiki.openPage', async (node: TreeNode) => {
+    vscode.commands.registerCommand('openRepoWiki.openPage', async (node?: TreeNode) => {
+      if (!node) return; // palette invocation without a tree item: nothing to open
       await showPage(node);
     }),
   );
