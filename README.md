@@ -120,6 +120,22 @@ Note: `export.js` loads CSS/JS assets (marked, highlight.js, mermaid) from a CDN
 at render time, so the PDF step needs internet access even if the wiki was
 generated fully offline.
 
+## VSCode extension
+
+A VS Code extension bundles the same engine and adds a wiki tree view, a live
+preview (mermaid + syntax highlighting), protected-edit awareness, and
+modify/supplement/rewrite + PDF export commands.
+
+```bash
+cd extension
+npm install
+npm run package   # → open-repo-wiki-0.1.0.vsix
+```
+
+Install the `.vsix` via **F1 → Extensions: Install from VSIX…**. See
+[extension/README.md](extension/README.md) for settings, commands, and the
+manual smoke checklist.
+
 ## Configuration
 
 Profiles live in [config.json](config.json). Put a `repo-wiki.config.json`

@@ -4,6 +4,10 @@
   "description": "Generate, browse, and edit an AI documentation wiki for any repository — works with any LLM backend.",
   "version": "0.1.0",
   "publisher": "genes8",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/genes8/open-repo-wiki.git"
+  },
   "license": "MIT",
   "engines": {
     "vscode": "^1.80.0"
