@@ -3,12 +3,31 @@ import { EngineRunner } from './engineRunner.js';
 import { resolveEnginePaths, resolveNodeCommand } from './enginePaths.js';
 import { buildGenerateArgs } from './pure/args.js';
 import { createRunProgress } from './pure/progress.js';
+import type { TreeNode } from './pure/treeModel.js';
+import { WikiTree } from './wikiTree.js';
 
 const outputChannel = vscode.window.createOutputChannel('Repo Wiki Engine');
 const runner = new EngineRunner();
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(outputChannel);
+
+  const tree = new WikiTree(workspaceRoot, () => vscode.workspace.getConfiguration('openRepoWiki').get<string>('language') || 'en');
+  context.subscriptions.push(
+    vscode.window.registerTreeDataProvider('openRepoWiki.pages', tree),
+    vscode.commands.registerCommand('openRepoWiki.refreshTree', () => tree.refresh()),
+    vscode.commands.registerCommand('openRepoWiki.openPage', async (node: TreeNode) => {
+      const root = workspaceRoot();
+      if (!root) return;
+      const file = vscode.Uri.file(`${root}/${tree.pageFilePath(node)}`);
+      try {
+        await vscode.window.showTextDocument(file);
+      } catch {
+        void vscode.window.showErrorMessage(`Repo Wiki: page file missing: ${node.page.path}`);
+      }
+    }),
+  );
+  tree.refresh();
 
   context.subscriptions.push(vscode.commands.registerCommand('openRepoWiki.showOutput', () => outputChannel.show()));
 
@@ -49,7 +68,7 @@ export function activate(context: vscode.ExtensionContext): void {
           'Show output',
         ).then(choice => { if (choice === 'Show output') outputChannel.show(); });
       } else {
-        // Task 4: tree.refresh()
+        tree.refresh();
         void vscode.window.showInformationMessage('Repo Wiki: generation finished.');
       }
     });
