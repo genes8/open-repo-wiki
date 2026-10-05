@@ -41,6 +41,28 @@ test('gitHasCommit is false without .git, true for a real repo', () => {
   assert.equal(gitHasCommit(path.resolve(__dirname, '..')), true); // this repo has commits
 });
 
+test('gitHasCommit resolves packed refs and returns false with no refs', t => {
+  const sha = 'a'.repeat(40);
+
+  // packed-refs variant: HEAD points at a branch whose only ref lives in
+  // packed-refs (no loose ref file), so the commit must be resolved from there.
+  const packedRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-packed-'));
+  t.after(() => fs.rmSync(packedRepo, { recursive: true, force: true }));
+  const packedGit = path.join(packedRepo, '.git');
+  fs.mkdirSync(packedGit, { recursive: true });
+  fs.writeFileSync(path.join(packedGit, 'HEAD'), 'ref: refs/heads/main\n');
+  fs.writeFileSync(path.join(packedGit, 'packed-refs'), `${sha} refs/heads/main\n`);
+  assert.equal(gitHasCommit(packedRepo), true);
+
+  // no-refs variant: HEAD points at a branch with neither a loose nor packed ref.
+  const noRefsRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-norefs-'));
+  t.after(() => fs.rmSync(noRefsRepo, { recursive: true, force: true }));
+  const noRefsGit = path.join(noRefsRepo, '.git');
+  fs.mkdirSync(noRefsGit, { recursive: true });
+  fs.writeFileSync(path.join(noRefsGit, 'HEAD'), 'ref: refs/heads/main\n');
+  assert.equal(gitHasCommit(noRefsRepo), false);
+});
+
 test('non-git repo still generates and emits a scan warning', async t => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-nogit-'));
   t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
