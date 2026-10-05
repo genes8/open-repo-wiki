@@ -12,17 +12,21 @@ import { createRunProgress } from './pure/progress.js';
 import { pageUriPath, resolveHref, type TreeNode } from './pure/treeModel.js';
 import { WikiPreview } from './preview.js';
 import { WikiTree } from './wikiTree.js';
+import { ChangeDetector } from './changeDetector.js';
+import { UpdateStatusBar } from './statusBar.js';
 
 const outputChannel = vscode.window.createOutputChannel('Repo Wiki Engine');
 const runner = new EngineRunner();
 
 const getLanguage = () => vscode.workspace.getConfiguration('openRepoWiki').get<string>('language') || 'en';
 const tree = new WikiTree(workspaceRoot, getLanguage);
+let statusBar: UpdateStatusBar | undefined;
 
 async function runEngineWithProgress(title: string, args: string[], context: vscode.ExtensionContext): Promise<boolean> {
   const root = workspaceRoot();
   if (!root) { void vscode.window.showWarningMessage('Repo Wiki: open a workspace folder first.'); return false; }
   if (runner.isActive()) { void vscode.window.showInformationMessage('Repo Wiki: a run is already in progress.'); return false; }
+  statusBar?.hide();
   const config = vscode.workspace.getConfiguration('openRepoWiki');
   const engine = resolveEnginePaths(context.extensionPath, config.get<string>('enginePath') || undefined);
   const node = resolveNodeCommand(config.get<string>('nodePath') || undefined);
@@ -52,6 +56,7 @@ async function runEngineWithProgress(title: string, args: string[], context: vsc
       ).then(choice => { if (choice === 'Show output') outputChannel.show(); });
     } else {
       tree.refresh();
+      statusBar?.hide();
       success = true;
     }
   });
@@ -60,6 +65,17 @@ async function runEngineWithProgress(title: string, args: string[], context: vsc
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(outputChannel);
+
+  const status = new UpdateStatusBar(() => void vscode.commands.executeCommand('openRepoWiki.generate'));
+  statusBar = status;
+  context.subscriptions.push(status);
+
+  const changeDetector = new ChangeDetector(
+    workspaceRoot,
+    getLanguage,
+    (autoRun) => { if (autoRun) void vscode.commands.executeCommand('openRepoWiki.generate'); else status.show(); },
+  );
+  context.subscriptions.push(changeDetector);
 
   const preview = new WikiPreview(context.extensionPath);
   let currentPagePath = '';
