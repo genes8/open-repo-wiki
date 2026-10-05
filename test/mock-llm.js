@@ -115,12 +115,71 @@ function defaultKnowledgeResponse({ cardName }) {
   ].join('\n');
 }
 
+function extractTagged(text, tag) {
+  const match = String(text).match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+  return match ? match[1].trim() : '';
+}
+
+function extractModifyAttached(userMessage) {
+  const block = String(userMessage).match(
+    /Attached source files \(the ONLY citable sources\):\n((?:- \[[^\n]+\]\([^)]+\)\n?)*)/
+  );
+  if (!block) return [];
+  return [...block[1].matchAll(/- \[[^\]]+\]\(([^)]+)\)/g)].map(match => match[1]);
+}
+
+function modifyWords(prefix, count) {
+  return Array.from({ length: count }, (_, index) => `${prefix}_${index + 1}`).join(' ');
+}
+
+function defaultModifyResponse({ title, userMessage }) {
+  const current = extractTagged(userMessage, 'current_page');
+  const operationMatch = String(userMessage).match(/\b(SUPPLEMENT|REWRITE|MODIFY):/);
+  const operation = operationMatch ? operationMatch[1].toLowerCase() : 'modify';
+  const attached = extractModifyAttached(userMessage);
+  const cite = attached.length
+    ? `<cite>\n**Referenced Files in This Document**\n${attached.map(rel => `- [${rel}](${rel})`).join('\n')}\n</cite>`
+    : '';
+  const range = attached.length
+    ? `**Section sources**\n- [${attached[0]}:L1-L1](${attached[0]}#L1-L1)`
+    : '';
+
+  if (operation === 'supplement') {
+    const base = current || [`# ${title}`, cite].filter(Boolean).join('\n\n');
+    const section = `## Mock Provider\n\n${range ? `${range}\n\n` : ''}${modifyWords('supplement', 70)}.`;
+    return `${base.trim()}\n\n${section}`;
+  }
+
+  if (operation === 'rewrite') {
+    const sections = [];
+    for (let index = 1; index <= 5; index++) {
+      const sources = index === 1 && range ? `${range}\n\n` : '';
+      sections.push(`## Rewritten Section ${index}\n\n${sources}${modifyWords(`rewrite${index}`, 70)}.`);
+    }
+    return [`# ${title}`, cite, sections.join('\n\n')].filter(Boolean).join('\n\n');
+  }
+
+  // modify: keep the existing page, rewrite one section's prose in place
+  if (current) {
+    return current
+      .replace(/^(## [^\n]+)\n\n[\s\S]*?(?=\n## |\n<cite>|$)/m, `$1\n\n${range ? `${range}\n\n` : ''}${modifyWords('modified', 70)}.`)
+      .trim();
+  }
+  const sections = [];
+  for (let index = 1; index <= 4; index++) {
+    const sources = index === 1 && range ? `${range}\n\n` : '';
+    sections.push(`## Modified Section ${index}\n\n${sources}${modifyWords(`modified${index}`, 70)}.`);
+  }
+  return [`# ${title}`, cite, sections.join('\n\n')].filter(Boolean).join('\n\n');
+}
+
 function createMockServer({
   plan = DEFAULT_PLAN,
   planResponder,
   pageResponder = defaultPageResponse,
   knowledgeResponder = defaultKnowledgeResponse,
   assignResponder,
+  modifyResponder,
   finishReasonResponder = () => 'stop',
   delay = 0,
 } = {}) {
@@ -131,6 +190,7 @@ function createMockServer({
     repairRequests: 0,
     knowledgeRequests: 0,
     assignRequests: 0,
+    modifyRequests: 0,
     lastPlanRunRequests: 0,
     byTitle: {},
     requestBodies: [],
@@ -217,6 +277,22 @@ function createMockServer({
             title: cardName,
             attempt: state.knowledgeRequests,
           };
+        } else if (/editing an existing wiki page/i.test(systemMessage)) {
+          state.modifyRequests++;
+          content = await (modifyResponder
+            ? modifyResponder({
+              payload,
+              state,
+              systemMessage,
+              userMessage,
+              defaultResponse: () => defaultModifyResponse({ title: extractTitle(userMessage), userMessage }),
+            })
+            : defaultModifyResponse({ title: extractTitle(userMessage), userMessage }));
+          responseContext = {
+            kind: 'modify',
+            title: extractTitle(userMessage),
+            attempt: state.modifyRequests,
+          };
         } else {
           const title = extractTitle(userMessage);
           const isRepair = /repairing a rejected/i.test(systemMessage);
@@ -290,5 +366,6 @@ module.exports = {
   defaultPageResponse,
   defaultKnowledgeResponse,
   defaultAssignResponse,
+  defaultModifyResponse,
   DEFAULT_PLAN,
 };
