@@ -102,8 +102,9 @@ test('planned page metadata keeps goal as description and hints reach the page p
     assert.match(orderPage.description, /order lifecycle/i);
     // the mock server records requests; assert the hint text reached the prompt
     const requests = server.requests();
-    const orderPrompt = requests.find(r => r.body.includes('Payments Guide')) || {};
-    assert.ok(String(orderPrompt.body || '').includes('Mention refunds'), 'hints must reach the LLM prompt');
+    const pagePrompt = requests.find(r => r.body.includes('Author hints:'));
+    assert.ok(pagePrompt, 'page prompt with author hints must be sent');
+    assert.ok(String(pagePrompt.body).includes('Mention refunds'), 'hints must reach the page prompt');
   } finally {
     await server.stop();
   }

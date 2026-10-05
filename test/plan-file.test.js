@@ -116,3 +116,11 @@ test('prototype-pollution keys and array top-level are rejected', () => {
   assert.throws(() => parseWikiPlanYaml('version: 1\n__proto__:\n  x: 1\n'), /invalid key/i);
   assert.throws(() => parseWikiPlanJson('[]'), /map/i);
 });
+
+test('documents: duplicate titles, self-parent, and grandchild chains are rejected', () => {
+  const base = 'version: 1\nrepowiki:\n  documents:\n';
+  assert.throws(() => parseWikiPlanYaml(base + '    - title: "A"\n    - title: "A"\n'), /duplicate/i);
+  assert.throws(() => parseWikiPlanYaml(base + '    - title: "A"\n      parent: "A"\n'), /parent/i);
+  assert.throws(() => parseWikiPlanYaml(base
+    + '    - title: "Root"\n    - title: "Mid"\n      parent: "Root"\n    - title: "Leaf"\n      parent: "Mid"\n'), /grandchild|top-level/i);
+});
