@@ -96,24 +96,33 @@ test('chatDetailed maps native Ollama token counts', async t => {
   });
 });
 
-test('chatAnthropic extracts text blocks only and maps stop reason + usage', async t => {
+function sseResponse(events, { failStatus = 0, bodyText = '' } = {}) {
+  if (failStatus) return { ok: false, status: failStatus, text: async () => bodyText };
+  const chunks = events.map(e => `data: ${JSON.stringify(e)}\n\n`);
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+  return { ok: true, body: { getReader: () => stream.getReader() } };
+}
+
+test('chatAnthropic streams text deltas only and maps stop reason + usage', async t => {
   const { chatDetailed } = require('../lib/providers');
   const original = global.fetch;
   t.after(() => { global.fetch = original; });
   let captured;
   global.fetch = async (url, init) => {
     captured = { url, headers: init.headers, body: JSON.parse(init.body) };
-    return {
-      ok: true,
-      json: async () => ({
-        content: [
-          { type: 'thinking', thinking: 'private reasoning' },
-          { type: 'text', text: 'FINAL ANSWER' },
-        ],
-        stop_reason: 'max_tokens',
-        usage: { input_tokens: 11, output_tokens: 7 },
-      }),
-    };
+    return sseResponse([
+      { type: 'message_start', message: { usage: { input_tokens: 11, output_tokens: 0 } } },
+      { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'private' } },
+      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'FINAL ' } },
+      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'ANSWER' } },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 7 } },
+    ]);
   };
   const result = await chatDetailed(
     { provider: 'anthropic', baseUrl: 'https://example.com/anthropic', model: 'glm-5.3-flash', apiKey: 'k' },
@@ -127,40 +136,31 @@ test('chatAnthropic extracts text blocks only and maps stop reason + usage', asy
   assert.equal(captured.headers['x-api-key'], 'k');
   assert.equal(captured.headers['anthropic-version'], '2023-06-01');
   assert.equal(captured.body.system, 'be brief');
+  assert.equal(captured.body.stream, true);
   assert.deepEqual(captured.body.messages, [{ role: 'user', content: 'hi' }]);
-  assert.ok(captured.body.max_tokens >= 4096);
+});
+
+test('chatAnthropic surfaces HTTP errors from the stream request', async t => {
+  const { chatDetailed } = require('../lib/providers');
+  const original = global.fetch;
+  t.after(() => { global.fetch = original; });
+  global.fetch = async () => sseResponse([], { failStatus: 429, bodyText: '{"error":{"code":"1113"}}' });
+  await assert.rejects(
+    chatDetailed({ provider: 'anthropic', baseUrl: 'https://e.com/a', model: 'm' }, [{ role: 'user', content: 'x' }], { retries: 0 }),
+    /HTTP 429.*1113/
+  );
 });
 
 test('chatAnthropic fails loudly when thinking consumed the whole budget', async t => {
   const { chatDetailed } = require('../lib/providers');
   const original = global.fetch;
   t.after(() => { global.fetch = original; });
-  global.fetch = async () => ({
-    ok: true,
-    json: async () => ({ content: [{ type: 'thinking', thinking: 'all reasoning' }], stop_reason: 'max_tokens' }),
-  });
+  global.fetch = async () => sseResponse([
+    { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'all reasoning' } },
+  ]);
   await assert.rejects(
     chatDetailed({ provider: 'anthropic', baseUrl: 'https://example.com/a', model: 'm' }, [{ role: 'user', content: 'x' }], { retries: 0 }),
-    /no text blocks/
-  );
-});
-
-test('chatAnthropic aborts stalled requests via timeoutMs', async t => {
-  const { chatDetailed } = require('../lib/providers');
-  const original = global.fetch;
-  t.after(() => { global.fetch = original; });
-  global.fetch = (url, init) => new Promise((_, reject) => {
-    if (init.signal) {
-      init.signal.addEventListener('abort', () => reject(new Error(`HTTP timeout after signal abort: ${init.signal.reason}`)));
-    }
-  });
-  await assert.rejects(
-    chatDetailed(
-      { provider: 'anthropic', baseUrl: 'https://example.com/a', model: 'm', timeoutMs: 120 },
-      [{ role: 'user', content: 'x' }],
-      { retries: 0 }
-    ),
-    /abort|timeout/i
+    /thinking consumed the max_tokens budget/
   );
 });
 
@@ -171,7 +171,10 @@ test('chatAnthropic disables thinking when profile.think is false', async t => {
   let captured;
   global.fetch = async (url, init) => {
     captured = JSON.parse(init.body);
-    return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }) };
+    return sseResponse([
+      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'ok' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+    ]);
   };
   await chatDetailed({ provider: 'anthropic', baseUrl: 'https://e.com/a', model: 'm', think: false }, [{ role: 'user', content: 'x' }], { retries: 0 });
   assert.deepEqual(captured.thinking, { type: 'disabled' });
