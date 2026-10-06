@@ -2,20 +2,11 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "watch",
-      "type": "npm",
-      "script": "watch",
-      "path": "${workspaceFolder}",
-      "isBackground": true,
-      "problemMatcher": {
-        "owner": "esbuild",
-        "pattern": { "regexp": "." },
-        "background": {
-          "activeOnStart": true,
-          "beginsPattern": "watching",
-          "endsPattern": "built"
-        }
-      }
+      "label": "compile",
+      "type": "shell",
+      "command": "node build.mjs",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "reveal": "silent", "panel": "shared" }
     }
   ]
 }
