@@ -126,3 +126,29 @@ test('normalizePlan applies coverage only when ensureCoverage is set', () => {
   assert.deepEqual(on.pages[0].files, ['README.md', 'lib/a.js', 'lib/b.js']);
   assert.deepEqual(on.coverage.assigned, [{ file: 'lib/b.js', page: 'overview.md' }]);
 });
+
+test('normalizePlan deterministically merges singleton directories', () => {
+  const scan = {
+    fileSet: new Set(['readme.md', 'a.js', 'b.js', 'c.js', 'd.js', 'e.js']),
+  };
+  const pages = [
+    { path: 'overview.md', title: 'Overview', files: ['readme.md', 'a.js'] },
+    { path: 'release/release.md', title: 'Release & Verification', description: 'How releases work', files: ['b.js'] },
+    { path: 'release/evidence.md', title: 'Evidence Records', description: 'Records', files: ['c.js', 'd.js'] },
+    { path: 'deep/solo.md', title: 'Solo', files: ['e.js'] },
+  ];
+  const result = normalizePlan(pages, scan, { maxPages: 10, ensureCoverage: false });
+  const paths = result.pages.map(p => p.path);
+  assert.ok(!paths.includes('release/release.md'), `merged away: ${paths.join(',')}`);
+  assert.ok(!paths.includes('release/evidence.md'), `merged away: ${paths.join(',')}`);
+  const merged = result.pages.find(p => p.path === 'release.md');
+  assert.ok(merged, `root merge exists: ${paths.join(',')}`);
+  assert.equal(merged.title, 'Release & Verification');
+  assert.deepEqual([...merged.files].sort(), ['b.js', 'c.js', 'd.js']);
+  assert.ok(paths.includes('deep-solo.md'), `flattened single: ${paths.join(',')}`);
+  // shape rules now pass deterministically
+  const { validatePlanQuality } = require('../lib/plan-quality');
+  const violations = validatePlanQuality(result.pages, [], { scan: null }).violations;
+  assert.ok(!violations.some(v => v.code === 'plan_singleton_directory' || v.code === 'plan_landing_children'),
+    `no shape violations: ${JSON.stringify(violations)}`);
+});
