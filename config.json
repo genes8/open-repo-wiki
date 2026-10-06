@@ -10,8 +10,9 @@
       "model": "glm-4.7-flash",
       "apiKey": "env:ZHIPU_API_KEY",
       "contextChars": 96000,
-      "maxTokens": 4096,
-      "concurrency": 1
+      "maxTokens": 12288,
+      "concurrency": 1,
+      "retries": 4
     },
     "glm-5": {
       "provider": "openai",
