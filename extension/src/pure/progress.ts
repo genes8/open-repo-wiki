@@ -9,7 +9,7 @@ export function createRunProgress(): (event: WikiEvent) => ProgressUpdate | null
     switch (event.type) {
       case 'plan_ready': {
         total = Array.isArray(event.pages) ? event.pages.length : 0;
-        return null; // message set by the caller via plan summary if desired
+        return { message: `planned ${total} pages — writing…`, increment: 3 };
       }
       case 'page_done': {
         done += 1;
