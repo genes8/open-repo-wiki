@@ -288,3 +288,16 @@ test('rejects a command present only beyond the visible source cutoff', () => {
   });
   assert.ok(codes(result).includes('ungrounded_command'));
 });
+
+test('refusal detector ignores impersonal technical statements (mural regression)', () => {
+  const { hasRefusalText } = require('../lib/quality');
+  // real documentation sentences that must NOT be treated as model refusals
+  assert.equal(hasRefusalText('The session token is bound to the account so another signed-in account cannot read or use it.'), false);
+  assert.equal(hasRefusalText('A revoked key cannot access the API afterwards.'), false);
+  assert.equal(hasRefusalText('The app cannot proceed without location permission, so we degrade gracefully.'), false);
+  // genuine refusals must still be caught
+  assert.equal(hasRefusalText('I cannot access the attached files.'), true);
+  assert.equal(hasRefusalText("I'm sorry, but I can't read the sources."), true);
+  assert.equal(hasRefusalText('I apologize for the inconvenience.'), true);
+  assert.equal(hasRefusalText('Please provide the source files to continue.'), true);
+});
