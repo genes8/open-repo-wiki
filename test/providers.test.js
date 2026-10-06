@@ -144,3 +144,22 @@ test('chatAnthropic fails loudly when thinking consumed the whole budget', async
     /no text blocks/
   );
 });
+
+test('chatAnthropic aborts stalled requests via timeoutMs', async t => {
+  const { chatDetailed } = require('../lib/providers');
+  const original = global.fetch;
+  t.after(() => { global.fetch = original; });
+  global.fetch = (url, init) => new Promise((_, reject) => {
+    if (init.signal) {
+      init.signal.addEventListener('abort', () => reject(new Error(`HTTP timeout after signal abort: ${init.signal.reason}`)));
+    }
+  });
+  await assert.rejects(
+    chatDetailed(
+      { provider: 'anthropic', baseUrl: 'https://example.com/a', model: 'm', timeoutMs: 120 },
+      [{ role: 'user', content: 'x' }],
+      { retries: 0 }
+    ),
+    /abort|timeout/i
+  );
+});
