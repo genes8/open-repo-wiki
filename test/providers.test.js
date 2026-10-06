@@ -95,3 +95,52 @@ test('chatDetailed maps native Ollama token counts', async t => {
     usage: { prompt_tokens: 7, completion_tokens: 11 },
   });
 });
+
+test('chatAnthropic extracts text blocks only and maps stop reason + usage', async t => {
+  const { chatDetailed } = require('../lib/providers');
+  const original = global.fetch;
+  t.after(() => { global.fetch = original; });
+  let captured;
+  global.fetch = async (url, init) => {
+    captured = { url, headers: init.headers, body: JSON.parse(init.body) };
+    return {
+      ok: true,
+      json: async () => ({
+        content: [
+          { type: 'thinking', thinking: 'private reasoning' },
+          { type: 'text', text: 'FINAL ANSWER' },
+        ],
+        stop_reason: 'max_tokens',
+        usage: { input_tokens: 11, output_tokens: 7 },
+      }),
+    };
+  };
+  const result = await chatDetailed(
+    { provider: 'anthropic', baseUrl: 'https://example.com/anthropic', model: 'glm-5.3-flash', apiKey: 'k' },
+    [{ role: 'system', content: 'be brief' }, { role: 'user', content: 'hi' }],
+    {}
+  );
+  assert.equal(result.content, 'FINAL ANSWER');
+  assert.equal(result.finishReason, 'length');
+  assert.deepEqual(result.usage, { prompt_tokens: 11, completion_tokens: 7 });
+  assert.equal(captured.url, 'https://example.com/anthropic/v1/messages');
+  assert.equal(captured.headers['x-api-key'], 'k');
+  assert.equal(captured.headers['anthropic-version'], '2023-06-01');
+  assert.equal(captured.body.system, 'be brief');
+  assert.deepEqual(captured.body.messages, [{ role: 'user', content: 'hi' }]);
+  assert.ok(captured.body.max_tokens >= 4096);
+});
+
+test('chatAnthropic fails loudly when thinking consumed the whole budget', async t => {
+  const { chatDetailed } = require('../lib/providers');
+  const original = global.fetch;
+  t.after(() => { global.fetch = original; });
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ content: [{ type: 'thinking', thinking: 'all reasoning' }], stop_reason: 'max_tokens' }),
+  });
+  await assert.rejects(
+    chatDetailed({ provider: 'anthropic', baseUrl: 'https://example.com/a', model: 'm' }, [{ role: 'user', content: 'x' }], { retries: 0 }),
+    /no text blocks/
+  );
+});

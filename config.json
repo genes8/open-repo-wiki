@@ -24,21 +24,21 @@
       "concurrency": 4
     },
     "glm-5.3": {
-      "provider": "openai",
-      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "provider": "anthropic",
+      "baseUrl": "https://open.bigmodel.cn/api/anthropic",
       "model": "glm-5.3",
       "apiKey": "env:ZHIPU_API_KEY",
       "contextChars": 120000,
-      "maxTokens": 12288,
+      "maxTokens": 16384,
       "concurrency": 4
     },
     "glm-5.3-flash": {
-      "provider": "openai",
-      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "provider": "anthropic",
+      "baseUrl": "https://open.bigmodel.cn/api/anthropic",
       "model": "glm-5.3-flash",
       "apiKey": "env:ZHIPU_API_KEY",
       "contextChars": 120000,
-      "maxTokens": 12288,
+      "maxTokens": 16384,
       "concurrency": 4
     },
     "ollama-qwen": {
