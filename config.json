@@ -32,7 +32,7 @@
       "maxTokens": 16384,
       "concurrency": 4,
       "think": false,
-      "timeoutMs": 600000
+      "timeoutMs": 180000
     },
     "glm-5.3-flash": {
       "provider": "anthropic",
@@ -43,7 +43,7 @@
       "maxTokens": 16384,
       "concurrency": 4,
       "think": false,
-      "timeoutMs": 600000
+      "timeoutMs": 180000
     },
     "ollama-qwen": {
       "provider": "ollama",
