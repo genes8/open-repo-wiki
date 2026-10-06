@@ -163,3 +163,16 @@ test('chatAnthropic aborts stalled requests via timeoutMs', async t => {
     /abort|timeout/i
   );
 });
+
+test('chatAnthropic disables thinking when profile.think is false', async t => {
+  const { chatDetailed } = require('../lib/providers');
+  const original = global.fetch;
+  t.after(() => { global.fetch = original; });
+  let captured;
+  global.fetch = async (url, init) => {
+    captured = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }) };
+  };
+  await chatDetailed({ provider: 'anthropic', baseUrl: 'https://e.com/a', model: 'm', think: false }, [{ role: 'user', content: 'x' }], { retries: 0 });
+  assert.deepEqual(captured.thinking, { type: 'disabled' });
+});

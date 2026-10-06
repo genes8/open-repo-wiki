@@ -30,7 +30,9 @@
       "apiKey": "env:ZHIPU_API_KEY",
       "contextChars": 120000,
       "maxTokens": 16384,
-      "concurrency": 4
+      "concurrency": 4,
+      "think": false,
+      "timeoutMs": 600000
     },
     "glm-5.3-flash": {
       "provider": "anthropic",
@@ -39,7 +41,9 @@
       "apiKey": "env:ZHIPU_API_KEY",
       "contextChars": 120000,
       "maxTokens": 16384,
-      "concurrency": 4
+      "concurrency": 4,
+      "think": false,
+      "timeoutMs": 600000
     },
     "ollama-qwen": {
       "provider": "ollama",
