@@ -1,11 +1,14 @@
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import * as vscode from 'vscode';
 import { EngineRunner } from './engineRunner.js';
 import { resolveEnginePaths, resolveNodeCommand } from './enginePaths.js';
 import { buildGenerateArgs, buildListModelsArgs, buildModifyArgs } from './pure/args.js';
+import { probeAnthropic, probeOllama, probeOpenAI } from './pure/apiProbe.js';
 import { readCatalog } from './pure/catalog.js';
+import { envVarNameFor, profileToEngineConfig, readManagedConfig, writeApiKey, writeManagedConfig, type ManagedProfile, type ProviderKind } from './pure/modelStore.js';
 import { wikiPaths } from './pure/paths.js';
 import { scaffoldPlan } from './pure/planScaffold.js';
 import { createRunProgress } from './pure/progress.js';
@@ -94,6 +97,216 @@ async function runEngineWithProgress(title: string, args: string[], context: vsc
   return success;
 }
 
+// ---------------------------------------------------------------------------
+// Guided model manager (gear menu). Managed profiles live in
+// <workspaceRoot>/repo-wiki.config.json and their key values in
+// <workspaceRoot>/.env. The engine's loadConfig discovers the repo
+// repo-wiki.config.json BEFORE the bundled app config, so profiles saved here
+// win over the app defaults. Merge (never overwrite) so hand-maintained
+// entries survive.
+// ---------------------------------------------------------------------------
+
+const MANAGED_CONFIG_FILENAME = 'repo-wiki.config.json';
+const ENV_FILENAME = '.env';
+
+interface KindMeta { label: string; detail: string; defaultName: string; defaultBaseUrl: string }
+
+const KIND_META: Record<ProviderKind, KindMeta> = {
+  openai: {
+    label: 'OpenAI-compatible',
+    detail: 'LM Studio, vLLM, llama.cpp, Zhipu GLM, Kimi, …',
+    defaultName: 'openai-local',
+    defaultBaseUrl: 'http://localhost:1234/v1',
+  },
+  anthropic: {
+    label: 'Anthropic-compatible',
+    detail: 'Zhipu GLM Coding Plan, Claude, …',
+    defaultName: 'anthropic',
+    defaultBaseUrl: 'https://open.bigmodel.cn/api/anthropic',
+  },
+  ollama: {
+    label: 'Ollama (local)',
+    detail: 'Native /api/chat endpoint, no key',
+    defaultName: 'ollama',
+    defaultBaseUrl: 'http://localhost:11434',
+  },
+};
+
+function isGitignored(root: string, relPath: string): boolean {
+  try {
+    execFileSync('git', ['check-ignore', '-q', relPath], { cwd: root, stdio: 'ignore' });
+    return true;
+  } catch { return false; }
+}
+
+function probeModel(kind: ProviderKind, baseUrl: string, apiKey: string, model: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (kind === 'openai') return probeOpenAI(baseUrl, apiKey, model);
+  if (kind === 'anthropic') return probeAnthropic(baseUrl, apiKey, model);
+  return probeOllama(baseUrl, model);
+}
+
+async function showSettingsMenu(context: vscode.ExtensionContext, tree: WikiTree): Promise<void> {
+  void context;
+  void tree;
+  const choice = await vscode.window.showQuickPick(
+    [
+      { label: '➕ Add / edit model…', value: 'add' as const },
+      { label: '🔑 Set API key…', value: 'key' as const },
+      { label: '🤖 Select model…', value: 'select' as const },
+      { label: '⚙️ All settings…', value: 'all' as const },
+    ],
+    { placeHolder: 'Repo Wiki — model settings' },
+  );
+  if (!choice) return;
+  switch (choice.value) {
+    case 'add': await addOrEditModel(); return;
+    case 'key': await setApiKey(); return;
+    case 'select': await vscode.commands.executeCommand('openRepoWiki.selectModel'); return;
+    case 'all': await vscode.commands.executeCommand('workbench.action.openSettings', 'openRepoWiki'); return;
+  }
+}
+
+async function addOrEditModel(): Promise<void> {
+  const root = workspaceRoot();
+  if (!root) { void vscode.window.showWarningMessage('Repo Wiki: open a workspace folder first.'); return; }
+  const configPath = path.join(root, MANAGED_CONFIG_FILENAME);
+  const envPath = path.join(root, ENV_FILENAME);
+
+  const kindPick = await vscode.window.showQuickPick(
+    (['openai', 'anthropic', 'ollama'] as const).map(k => ({ label: KIND_META[k].label, detail: KIND_META[k].detail, provider: k })),
+    { placeHolder: 'Provider kind' },
+  );
+  if (!kindPick) return;
+  const kind = kindPick.provider;
+
+  const config = readManagedConfig(configPath);
+  const nameInput = await vscode.window.showInputBox({
+    prompt: 'Profile name',
+    value: KIND_META[kind].defaultName,
+    ignoreFocusOut: true,
+  });
+  if (!nameInput) return;
+  const name = nameInput.trim();
+  if (!name) { void vscode.window.showWarningMessage('Repo Wiki: profile name cannot be empty.'); return; }
+
+  // Editing an existing managed profile prefills its saved values.
+  const existing = config.models[name];
+
+  const baseUrl = await vscode.window.showInputBox({
+    prompt: 'Base URL',
+    value: (existing && typeof existing.baseUrl === 'string' && existing.baseUrl) || KIND_META[kind].defaultBaseUrl,
+    ignoreFocusOut: true,
+  });
+  if (!baseUrl) return;
+
+  const model = await vscode.window.showInputBox({
+    prompt: 'Model id',
+    value: existing && typeof existing.model === 'string' ? existing.model : '',
+    ignoreFocusOut: true,
+  });
+  if (!model) return;
+
+  let apiKey = '';
+  if (kind !== 'ollama') {
+    const key = await vscode.window.showInputBox({
+      prompt: kind === 'openai' ? 'API key (optional for local servers)' : 'API key',
+      password: true,
+      ignoreFocusOut: true,
+    });
+    if (key === undefined) return;
+    apiKey = key;
+  }
+
+  const profile: ManagedProfile = { name, provider: kind, baseUrl, model };
+  const { proceed, apiKey: finalKey } = await testProfileBeforeSave(kind, baseUrl, model, apiKey);
+  if (!proceed) return;
+
+  // This file is user-visible and engine-discovered: the engine reads
+  // <workspace>/repo-wiki.config.json BEFORE the app config, so merge into the
+  // existing models map instead of replacing it.
+  const models: Record<string, unknown> = { ...config.models };
+  models[name] = profileToEngineConfig(profile);
+  writeManagedConfig(configPath, { default: config.default || name, models });
+  if (kind !== 'ollama' && finalKey) {
+    writeApiKey(envPath, envVarNameFor(name), finalKey);
+  }
+  if (isGitignored(root, ENV_FILENAME)) {
+    void vscode.window.showInformationMessage(`Repo Wiki: Saved ${name} → repo-wiki.config.json + .env (gitignored).`);
+  } else {
+    void vscode.window.showWarningMessage(`Repo Wiki: Saved ${name} → repo-wiki.config.json + .env. Warning: .env is not gitignored in this repo — your key may be committed.`);
+  }
+}
+
+async function testProfileBeforeSave(kind: ProviderKind, baseUrl: string, model: string, initialKey: string): Promise<{ proceed: boolean; apiKey: string }> {
+  let apiKey = initialKey;
+  for (;;) {
+    const answer = await vscode.window.showQuickPick(
+      [{ label: 'Test', description: 'probe the endpoint now' }, { label: 'Skip', description: 'save without testing' }],
+      { placeHolder: 'Test this model before saving?' },
+    );
+    if (!answer || answer.label === 'Skip') return { proceed: true, apiKey };
+    const result = await probeModel(kind, baseUrl, apiKey, model);
+    if (result.ok) {
+      void vscode.window.showInformationMessage('Repo Wiki: probe OK — the endpoint responds.');
+      return { proceed: true, apiKey };
+    }
+    if (kind === 'ollama') {
+      const action = await vscode.window.showErrorMessage(`Repo Wiki: probe failed — ${result.error}`, 'Skip');
+      if (action === 'Skip') return { proceed: true, apiKey };
+      return { proceed: false, apiKey };
+    }
+    const action = await vscode.window.showErrorMessage(`Repo Wiki: probe failed — ${result.error}`, 'Retry key', 'Skip');
+    if (action === 'Skip') return { proceed: true, apiKey };
+    if (action === 'Retry key') {
+      const next = await vscode.window.showInputBox({ prompt: 'API key', password: true, ignoreFocusOut: true });
+      if (next === undefined) return { proceed: false, apiKey };
+      apiKey = next;
+      continue;
+    }
+    return { proceed: false, apiKey };
+  }
+}
+
+async function setApiKey(): Promise<void> {
+  const root = workspaceRoot();
+  if (!root) { void vscode.window.showWarningMessage('Repo Wiki: open a workspace folder first.'); return; }
+  const configPath = path.join(root, MANAGED_CONFIG_FILENAME);
+  const envPath = path.join(root, ENV_FILENAME);
+  const config = readManagedConfig(configPath);
+  const names = Object.keys(config.models);
+  if (!names.length) { void vscode.window.showWarningMessage('Repo Wiki: no managed models yet — add one first.'); return; }
+
+  const picked = await vscode.window.showQuickPick(
+    names.map(n => ({ label: n, description: `${config.models[n].provider}: ${config.models[n].model}` })),
+    { placeHolder: 'Model profile' },
+  );
+  if (!picked) return;
+  const name = picked.label;
+  const profile = config.models[name];
+  if (profile.provider === 'ollama') { void vscode.window.showInformationMessage('Repo Wiki: Ollama profiles use no API key.'); return; }
+
+  let key = await vscode.window.showInputBox({ prompt: `API key for ${name}`, password: true, ignoreFocusOut: true });
+  if (key === undefined) return;
+  if (!key.trim()) { void vscode.window.showWarningMessage('Repo Wiki: key cannot be empty.'); return; }
+
+  for (;;) {
+    const result = await probeModel(profile.provider, profile.baseUrl, key, profile.model);
+    if (result.ok) { void vscode.window.showInformationMessage(`Repo Wiki: key works for ${name}.`); break; }
+    const action = await vscode.window.showErrorMessage(`Repo Wiki: probe failed — ${result.error}`, 'Retry key', 'Save anyway');
+    if (action === 'Save anyway') break;
+    if (action === 'Retry key') {
+      const next = await vscode.window.showInputBox({ prompt: `API key for ${name}`, password: true, ignoreFocusOut: true });
+      if (next === undefined) return;
+      key = next;
+      continue;
+    }
+    return;
+  }
+
+  writeApiKey(envPath, envVarNameFor(name), key);
+  void vscode.window.showInformationMessage(`Repo Wiki: saved API key for ${name} → .env`);
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(outputChannel);
 
@@ -159,7 +372,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.commands.registerCommand('openRepoWiki.showOutput', () => outputChannel.show()));
 
   context.subscriptions.push(vscode.commands.registerCommand('openRepoWiki.openSettings', () =>
-    vscode.commands.executeCommand('workbench.action.openSettings', 'openRepoWiki')));
+    showSettingsMenu(context, tree)));
 
   context.subscriptions.push(vscode.commands.registerCommand('openRepoWiki.generate', async () => {
     const root = workspaceRoot();
