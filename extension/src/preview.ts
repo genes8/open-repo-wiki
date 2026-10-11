@@ -42,7 +42,10 @@ export class WikiPreview {
 </head>
 <body>
   <header id="topbar"><span id="title"></span><span id="badges"></span><button id="edit-source" type="button">Edit source</button></header>
-  <main id="page"></main>
+  <div id="layout">
+    <nav id="toc"><h3>On this page</h3><ul id="toc-list"></ul></nav>
+    <main id="page"></main>
+  </div>
   <script src="${dir('marked.js')}"></script>
   <script src="${dir('highlight.js')}"></script>
   <script src="${dir('mermaid.js')}"></script>
