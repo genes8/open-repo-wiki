@@ -30,3 +30,22 @@ integration by pressing **F5** (Run Extension) from the `extension/` folder.
 10. **Save a dependent file → status-bar hint** — edit and save a source file
     referenced by a wiki page; a status-bar hint appears (or generation runs
     automatically when `autoUpdate` is `auto`).
+11. **Tree header shows progress during generate** — run Generate on a small
+    repo; the "Wiki Pages" header shows `⚡ Writing wiki — 0/N pages` and the
+    counter/badge advances as each page is written, ending with a `✓ N pages`
+    summary.
+12. **Preview shows TOC sidebar + framed code blocks** — open a page; the
+    preview shows an "On this page" sidebar with h2/h3 links that smooth-scroll,
+    and code blocks render in labeled frames (mermaid blocks in a separate
+    frame).
+13. **Gear menu add-model flow saves both files** — open the gear menu, run
+    ➕ Add / edit model…, fill in a non-Ollama profile and API key, choose
+    **Skip** on the test; confirm `repo-wiki.config.json` gains the profile and
+    `.env` gains `REPO_WIKI_KEY_<PROFILE>`.
+14. **Set API key flow** — open the gear menu, run 🔑 Set API key…, pick a
+    managed non-Ollama profile, enter a key; confirm `.env` is updated (or, for
+    an Ollama profile, the "no API key" message appears).
+15. **Probe Test button against a real endpoint** — with a reachable endpoint
+    (e.g. Ollama at `http://localhost:11434`), run ➕ Add / edit model…, pick
+    Ollama, enter the base URL + model, choose **Test**; confirm the "probe OK"
+    message (or a retry/skip prompt on failure).

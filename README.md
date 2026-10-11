@@ -124,7 +124,10 @@ generated fully offline.
 
 A VS Code extension bundles the same engine and adds a wiki tree view, a live
 preview (mermaid + syntax highlighting), protected-edit awareness, and
-modify/supplement/rewrite + PDF export commands.
+modify/supplement/rewrite + PDF export commands. A gear menu manages model
+profiles (saved to `repo-wiki.config.json` + `.env`), and generation shows live
+progress in the tree header and a preview with an "On this page" table of
+contents.
 
 ```bash
 cd extension

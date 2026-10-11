@@ -13,13 +13,17 @@ any LLM backend (local or online) that the engine supports.
 - **Generate / update** an any-LLM wiki for the open workspace (same engine and
   config profiles as the CLI: OpenAI-compatible, Ollama, llama.cpp server, GGUF).
 - **Browse** pages in the "Wiki Pages" tree view and open a **preview** with
-  rendered **mermaid** diagrams and syntax-highlighted code blocks.
+  rendered **mermaid** diagrams, syntax-highlighted code blocks, an "On this
+  page" table of contents sidebar, and framed code blocks.
 - **Protect manual edits** — pages you hand-edit are marked 🔒 and are never
   silently overwritten by a later generation run.
 - **Modify / supplement / rewrite** a single page through a guided flow without
   regenerating the whole wiki.
 - **Export** the wiki to styled **PDFs** (per page + combined with table of
   contents).
+- **Live progress** — during generation the "Wiki Pages" tree header shows
+  `⚡ Writing wiki — 0/N pages` and a per-page counter/badge as each page is
+  written, then a `✓ N pages` summary with the model name.
 
 ## Install from `.vsix`
 
@@ -49,7 +53,7 @@ In VS Code: **F1 → Extensions: Install from VSIX…** and select
 |---|---|---|
 | `openRepoWiki.generate` | Repo Wiki: Generate / Update Wiki | Generate or update the wiki for the current workspace. |
 | `openRepoWiki.refreshTree` | Repo Wiki: Refresh | Re-read the catalog and refresh the wiki tree. |
-| `openRepoWiki.openSettings` | Repo Wiki: Settings | Open the `openRepoWiki` settings. |
+| `openRepoWiki.openSettings` | Repo Wiki: Settings | Open the gear menu (model manager). |
 | `openRepoWiki.selectLanguage` | Repo Wiki: Select Language | Choose the wiki output language. |
 | `openRepoWiki.modifyPage` | Repo Wiki: Modify Page… | Modify, supplement, or rewrite one page. |
 | `openRepoWiki.editPlan` | Repo Wiki: Edit wiki_plan.yaml | Scaffold (if missing) and open the wiki plan file. |
@@ -57,6 +61,27 @@ In VS Code: **F1 → Extensions: Install from VSIX…** and select
 | `openRepoWiki.selectModel` | Repo Wiki: Select Model Profile | Pick the default model profile from the engine config. |
 | `openRepoWiki.showOutput` | Repo Wiki: Show Engine Output | Show the engine child-process output channel. |
 | `openRepoWiki.openPage` | Repo Wiki: Open Page | Open a page in the preview (also invoked from the tree). |
+
+## Model manager (gear menu)
+
+Click the gear icon in the "Wiki Pages" view title bar (or run **Repo Wiki:
+Settings**) to open the model manager. It offers four items:
+
+| Item | What it does |
+|---|---|
+| ➕ Add / edit model… | Guided flow to add or edit a managed model profile: provider kind (OpenAI-compatible, Anthropic-compatible, or Ollama), base URL, model id, and an optional API key, with an optional **Test** probe before saving. |
+| 🔑 Set API key… | Set or update the API key for an existing managed profile, probing it before saving. |
+| 🤖 Select model… | Pick the default model profile (same as the Select Model Profile command). |
+| ⚙️ All settings… | Open the `openRepoWiki` VS Code settings. |
+
+Managed profiles are written to **`repo-wiki.config.json`** in the workspace
+root. The engine discovers this file *before* its bundled app config, so managed
+profiles win over the defaults. Non-Ollama API keys are written to **`.env`** in
+the workspace root as `REPO_WIKI_KEY_<PROFILE>` and referenced from the config
+via `"apiKey": "env:REPO_WIKI_KEY_<PROFILE>"`. Both files are merged, never
+overwritten. Key values are **never logged** — they only live in `.env` and in
+memory during a probe. If `.env` is not gitignored, the extension warns that
+your key may be committed.
 
 ## Engine resolution order
 
