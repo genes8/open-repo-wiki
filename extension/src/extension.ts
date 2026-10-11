@@ -217,7 +217,18 @@ async function addOrEditModel(): Promise<void> {
     apiKey = key.trim();
   }
 
-  const profile: ManagedProfile = { name, provider: kind, baseUrl, model };
+  // Preserve optional fields (maxTokens/concurrency/think) when editing an
+  // existing managed entry — the guided form only edits the core fields.
+  // (`existing` is the profile read at the top of this function.)
+  const profile: ManagedProfile = {
+    name,
+    provider: kind,
+    baseUrl,
+    model,
+    ...(existing && typeof existing.maxTokens === 'number' ? { maxTokens: existing.maxTokens } : {}),
+    ...(existing && typeof existing.concurrency === 'number' ? { concurrency: existing.concurrency } : {}),
+    ...(existing && existing.think === false ? { think: false } : {}),
+  };
   const { proceed, apiKey: finalKey } = await testProfileBeforeSave(kind, baseUrl, model, apiKey);
   if (!proceed) return;
 
