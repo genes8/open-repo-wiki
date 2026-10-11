@@ -9,6 +9,7 @@ import {
   writeApiKey,
   envVarNameFor,
   profileToEngineConfig,
+  upsertModel,
 } from '../src/pure/modelStore.js';
 
 const tmpdir = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'modelStore-'));
@@ -55,6 +56,43 @@ test('writeApiKey appends a new variable (new and non-newline-terminated files)'
   assert.equal(fs.readFileSync(second, 'utf8'), 'A=1\nREPO_WIKI_KEY_NEW=sk-2\n');
 });
 
+test('writeApiKey writes keys containing dollar patterns literally', () => {
+  const dir = tmpdir();
+  const envPath = path.join(dir, '.env');
+  fs.writeFileSync(envPath, 'A=1\n');
+  writeApiKey(envPath, 'REPO_WIKI_KEY_FOO', 'p$&w$1d');
+  assert.equal(fs.readFileSync(envPath, 'utf8'), 'A=1\nREPO_WIKI_KEY_FOO=p$&w$1d\n');
+});
+
+test('upsertModel preserves foreign top-level keys and existing default', () => {
+  const dir = tmpdir();
+  const configPath = path.join(dir, 'repo-wiki.config.json');
+  fs.writeFileSync(configPath, JSON.stringify({
+    language: 'sr',
+    maxPages: 42,
+    default: 'existing',
+    models: { existing: { provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'qwen' } },
+  }, null, 2));
+  upsertModel(configPath, 'new', { provider: 'openai', baseUrl: 'http://x/v1', model: 'm' });
+  const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(raw.language, 'sr');
+  assert.equal(raw.maxPages, 42);
+  assert.equal(raw.default, 'existing');
+  assert.deepEqual(raw.models.existing, { provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'qwen' });
+  assert.deepEqual(raw.models.new, { provider: 'openai', baseUrl: 'http://x/v1', model: 'm' });
+});
+
+test('upsertModel sets default when absent and initializes missing models', () => {
+  const dir = tmpdir();
+  const configPath = path.join(dir, 'repo-wiki.config.json');
+  fs.writeFileSync(configPath, JSON.stringify({ language: 'en' }, null, 2));
+  upsertModel(configPath, 'first', { provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'qwen' });
+  const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(raw.language, 'en');
+  assert.equal(raw.default, 'first');
+  assert.deepEqual(raw.models, { first: { provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'qwen' } });
+});
+
 test('envVarNameFor upper-cases and sanitizes profile names', () => {
   assert.equal(envVarNameFor('My Model'), 'REPO_WIKI_KEY_MY_MODEL');
   assert.equal(envVarNameFor('zhipu-glm'), 'REPO_WIKI_KEY_ZHIPU_GLM');
@@ -76,14 +114,13 @@ test('profileToEngineConfig maps a profile to the engine config shape', () => {
   );
 });
 
-test('profileToEngineConfig defaults maxTokens and omits optional flags', () => {
+test('profileToEngineConfig omits apiKey for ollama and defaults maxTokens', () => {
   assert.deepEqual(
     profileToEngineConfig({ name: 'ollama-qwen', provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'qwen' }),
     {
       provider: 'ollama',
       baseUrl: 'http://localhost:11434',
       model: 'qwen',
-      apiKey: 'env:REPO_WIKI_KEY_OLLAMA_QWEN',
       maxTokens: 16384,
     },
   );

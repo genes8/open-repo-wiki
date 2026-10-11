@@ -8,7 +8,7 @@ import { resolveEnginePaths, resolveNodeCommand } from './enginePaths.js';
 import { buildGenerateArgs, buildListModelsArgs, buildModifyArgs } from './pure/args.js';
 import { probeAnthropic, probeOllama, probeOpenAI } from './pure/apiProbe.js';
 import { readCatalog } from './pure/catalog.js';
-import { envVarNameFor, profileToEngineConfig, readManagedConfig, writeApiKey, writeManagedConfig, type ManagedProfile, type ProviderKind } from './pure/modelStore.js';
+import { envVarNameFor, profileToEngineConfig, readManagedConfig, upsertModel, writeApiKey, type ManagedProfile, type ProviderKind } from './pure/modelStore.js';
 import { wikiPaths } from './pure/paths.js';
 import { scaffoldPlan } from './pure/planScaffold.js';
 import { createRunProgress } from './pure/progress.js';
@@ -214,7 +214,7 @@ async function addOrEditModel(): Promise<void> {
       ignoreFocusOut: true,
     });
     if (key === undefined) return;
-    apiKey = key;
+    apiKey = key.trim();
   }
 
   const profile: ManagedProfile = { name, provider: kind, baseUrl, model };
@@ -222,11 +222,9 @@ async function addOrEditModel(): Promise<void> {
   if (!proceed) return;
 
   // This file is user-visible and engine-discovered: the engine reads
-  // <workspace>/repo-wiki.config.json BEFORE the app config, so merge into the
-  // existing models map instead of replacing it.
-  const models: Record<string, unknown> = { ...config.models };
-  models[name] = profileToEngineConfig(profile);
-  writeManagedConfig(configPath, { default: config.default || name, models });
+  // <workspace>/repo-wiki.config.json BEFORE the app config. Upsert only the
+  // profile entry and preserve every other top-level key the user may have set.
+  upsertModel(configPath, name, profileToEngineConfig(profile));
   if (kind !== 'ollama' && finalKey) {
     writeApiKey(envPath, envVarNameFor(name), finalKey);
   }
@@ -260,7 +258,7 @@ async function testProfileBeforeSave(kind: ProviderKind, baseUrl: string, model:
     if (action === 'Retry key') {
       const next = await vscode.window.showInputBox({ prompt: 'API key', password: true, ignoreFocusOut: true });
       if (next === undefined) return { proceed: false, apiKey };
-      apiKey = next;
+      apiKey = next.trim();
       continue;
     }
     return { proceed: false, apiKey };
@@ -285,9 +283,10 @@ async function setApiKey(): Promise<void> {
   const profile = config.models[name];
   if (profile.provider === 'ollama') { void vscode.window.showInformationMessage('Repo Wiki: Ollama profiles use no API key.'); return; }
 
-  let key = await vscode.window.showInputBox({ prompt: `API key for ${name}`, password: true, ignoreFocusOut: true });
-  if (key === undefined) return;
-  if (!key.trim()) { void vscode.window.showWarningMessage('Repo Wiki: key cannot be empty.'); return; }
+  const entered = await vscode.window.showInputBox({ prompt: `API key for ${name}`, password: true, ignoreFocusOut: true });
+  if (entered === undefined) return;
+  let key = entered.trim();
+  if (!key) { void vscode.window.showWarningMessage('Repo Wiki: key cannot be empty.'); return; }
 
   for (;;) {
     const result = await probeModel(profile.provider, profile.baseUrl, key, profile.model);
@@ -297,7 +296,7 @@ async function setApiKey(): Promise<void> {
     if (action === 'Retry key') {
       const next = await vscode.window.showInputBox({ prompt: `API key for ${name}`, password: true, ignoreFocusOut: true });
       if (next === undefined) return;
-      key = next;
+      key = next.trim();
       continue;
     }
     return;
