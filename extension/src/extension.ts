@@ -9,6 +9,7 @@ import { readCatalog } from './pure/catalog.js';
 import { wikiPaths } from './pure/paths.js';
 import { scaffoldPlan } from './pure/planScaffold.js';
 import { createRunProgress } from './pure/progress.js';
+import { createTreeStatus } from './pure/treeStatus.js';
 import { pageUriPath, resolveHref, type TreeNode } from './pure/treeModel.js';
 import { WikiPreview } from './preview.js';
 import { WikiTree } from './wikiTree.js';
@@ -20,7 +21,13 @@ const runner = new EngineRunner();
 
 const getLanguage = () => vscode.workspace.getConfiguration('openRepoWiki').get<string>('language') || 'en';
 const tree = new WikiTree(workspaceRoot, getLanguage);
+let treeView: vscode.TreeView<TreeNode> | undefined;
 let statusBar: UpdateStatusBar | undefined;
+
+function modelFromArgs(args: string[]): string {
+  const index = args.indexOf('-m');
+  return index >= 0 && index + 1 < args.length ? args[index + 1] : '';
+}
 
 async function runEngineWithProgress(title: string, args: string[], context: vscode.ExtensionContext): Promise<boolean> {
   const root = workspaceRoot();
@@ -31,6 +38,9 @@ async function runEngineWithProgress(title: string, args: string[], context: vsc
   const engine = resolveEnginePaths(context.extensionPath, config.get<string>('enginePath') || undefined);
   const node = resolveNodeCommand(config.get<string>('nodePath') || undefined);
   const progressOf = createRunProgress();
+  const status = createTreeStatus();
+  const model = modelFromArgs(args);
+  let finalStats: { generated: number; degraded: number; skipped: number } = { generated: 0, degraded: 0, skipped: 0 };
   let success = false;
   await vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
@@ -45,11 +55,27 @@ async function runEngineWithProgress(title: string, args: string[], context: vsc
       onEvent: event => {
         const update = progressOf(event);
         if (update) progress.report(update);
+        if (treeView) {
+          const s = status.step(event);
+          if (s) {
+            treeView.message = s.message;
+            if (s.badge !== undefined && 'badge' in treeView) {
+              treeView.badge = { value: s.badge, tooltip: 'pages written' };
+            }
+          }
+        }
+        if (event.type === 'run_finished' && event.stats) {
+          finalStats = { generated: event.stats.generated, degraded: event.stats.degraded, skipped: event.stats.skipped };
+        }
         outputChannel.appendLine(JSON.stringify(event));
       },
       onLog: line => outputChannel.appendLine(line),
     });
     if (result.code !== 0) {
+      if (treeView) {
+        treeView.message = '✗ last run failed — see output';
+        treeView.badge = undefined;
+      }
       void vscode.window.showErrorMessage(
         `Repo Wiki: run failed${result.errorEvent?.code ? ` (${result.errorEvent.code})` : ''}: ${result.errorEvent?.message ?? 'see output'}`,
         'Show output',
@@ -57,6 +83,11 @@ async function runEngineWithProgress(title: string, args: string[], context: vsc
     } else {
       tree.refresh();
       statusBar?.hide();
+      if (treeView) {
+        const s = status.summary(finalStats, model);
+        treeView.message = s.message;
+        treeView.badge = undefined;
+      }
       success = true;
     }
   });
@@ -114,8 +145,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  treeView = vscode.window.createTreeView('openRepoWiki.pages', { treeDataProvider: tree });
   context.subscriptions.push(
-    vscode.window.registerTreeDataProvider('openRepoWiki.pages', tree),
+    treeView,
     vscode.commands.registerCommand('openRepoWiki.refreshTree', () => tree.refresh()),
     vscode.commands.registerCommand('openRepoWiki.openPage', async (node?: TreeNode) => {
       if (!node) return; // palette invocation without a tree item: nothing to open
