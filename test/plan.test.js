@@ -63,10 +63,20 @@ test('hard-cap recomputation clears stale explicit landing metadata', () => {
     { path: 'guides/b.md', title: 'B', files: ['lib/b.js'] },
   ], scan, { maxPages: 2 });
 
-  const formerLanding = result.pages.find(page => page.path === 'guides/guides.md');
-  assert.equal(formerLanding._landing, undefined);
-  assert.equal(formerLanding._children, undefined);
+  // The cap leaves one page in the guides directory, so the deterministic
+  // singleton repair absorbs the landing into the content root instead of
+  // keeping an invalid one-page landing behind.
+  assert.equal(result.pages.length, 2);
+  const flattened = result.pages.find(page => page.path === 'guides.md');
+  assert.ok(flattened, `flattened singleton: ${result.pages.map(page => page.path).join(',')}`);
+  assert.equal(flattened._landing, undefined);
+  assert.equal(flattened._children, undefined);
   assert.deepEqual([...result.parentByPath], []);
+  const { validatePlanQuality } = require('../lib/plan-quality');
+  assert.deepEqual(
+    validatePlanQuality(result.pages, [], { scan: null }).violations.map(item => item.code),
+    []
+  );
 });
 
 test('normalizePlan rejects plans without overview.md', () => {
@@ -151,4 +161,31 @@ test('normalizePlan deterministically merges singleton directories', () => {
   const violations = validatePlanQuality(result.pages, [], { scan: null }).violations;
   assert.ok(!violations.some(v => v.code === 'plan_singleton_directory' || v.code === 'plan_landing_children'),
     `no shape violations: ${JSON.stringify(violations)}`);
+});
+
+test('hard-cap trimming re-merges singleton directories it creates', () => {
+  // A 21-page plan against maxPages=20: trimming the overflow used to run after
+  // the deterministic singleton merge, leaving guides/guides.md with one child
+  // and the guides directory with a single non-landing page — the exact
+  // plan_landing_children / plan_singleton_directory shape the LLM repair loop
+  // then could not fix.
+  const pageScan = { fileSet: new Set() };
+  const raw = [
+    { path: 'overview.md', title: 'Overview' },
+    { path: 'architecture/architecture.md', title: 'Architecture' },
+    ...['a', 'b', 'c', 'd', 'e'].map(name => ({ path: `architecture/${name}.md`, title: name })),
+    { path: 'features/features.md', title: 'Features' },
+    ...['f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n'].map(name => ({ path: `features/${name}.md`, title: name })),
+    { path: 'design/design-system.md', title: 'Design system' },
+    { path: 'guides/guides.md', title: 'Guides' },
+    { path: 'guides/getting-started.md', title: 'Getting started' },
+    { path: 'guides/testing.md', title: 'Testing' },
+  ];
+  assert.equal(raw.length, 21);
+
+  const result = normalizePlan(raw, pageScan, { maxPages: 20, ensureCoverage: false });
+  assert.ok(result.pages.length <= 20, `cap respected: ${result.pages.length}`);
+  const { validatePlanQuality } = require('../lib/plan-quality');
+  const violations = validatePlanQuality(result.pages, [], { scan: null }).violations;
+  assert.deepEqual(violations.map(v => v.code), [], `no shape violations: ${JSON.stringify(violations)}`);
 });
