@@ -139,6 +139,18 @@ Install the `.vsix` via **F1 → Extensions: Install from VSIX…**. See
 [extension/README.md](extension/README.md) for settings, commands, and the
 manual smoke checklist.
 
+## DeepSeek Harness plugin
+
+A DeepSeek Harness (DSH) plugin (`dsh-open-repo-wiki`) wraps the same engine as a native
+panel in the Harness Web UI. The engine appears as a first-class sidebar entry: it analyzes a
+repository, streams the wiki plan and page generation live, renders the result (code blocks,
+tables, citations, mermaid diagrams) in a tree + preview, and exports the whole wiki or a selected
+page segment to PDF. The plugin also ships a model manager (profiles, API keys, connection tests,
+default model, max pages) backed by the same `repo-wiki.config.json` / `.env` layout as the CLI.
+
+The plugin runs this engine as a child process (`generate.js --json-events`) and ships its own copy
+of the PDF exporter, so the engine stays usable from the CLI and the VS Code extension unchanged.
+
 ## Configuration
 
 Profiles live in [config.json](config.json). Put a `repo-wiki.config.json`
@@ -348,7 +360,9 @@ graph LR
   scan. Every final directory with two or more content pages gets exactly one
   landing page, even when the model omitted it. Landings are generated after
   their children, singleton directories and one-child landings are rejected,
-  and the final page count never exceeds `maxPages`. Compared with the last
+  and the final page count never exceeds `maxPages` (the singleton repair re-runs
+  after each cap trim, so trimming cannot re-introduce a one-child landing or a
+  one-page directory). Compared with the last
   successful plan, losing more than 25% of pages or any previously covered key
   topic triggers a planner repair; three rejected plans abort before staging.
 - **Transactional:** content, catalog/index/state, and requested knowledge cards
